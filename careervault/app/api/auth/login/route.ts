@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateUser } from "@/lib/server-auth";
+import { setSessionCookie } from "@/lib/server-session";
 
 export const runtime = "nodejs";
 
@@ -11,7 +12,13 @@ export async function POST(request: NextRequest) {
       String(body.password || ""),
     );
 
-    return NextResponse.json(result, { status: result.status });
+    const response = NextResponse.json(result, { status: result.status });
+
+    if (result.ok && result.session) {
+      setSessionCookie(response, result.session);
+    }
+
+    return response;
   } catch {
     return NextResponse.json(
       { ok: false, message: "We could not sign you in. Please try again." },

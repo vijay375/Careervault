@@ -49,6 +49,7 @@ type ManagedDocument = VaultDocument & {
 };
 
 type UserProfile = {
+  id: string;
   name: string;
   email: string;
 };
@@ -61,6 +62,7 @@ type AuthApiResponse = {
 };
 
 const defaultUser = {
+  id: "",
   name: "",
   email: "",
 };
@@ -91,6 +93,7 @@ function getPasswordPolicyMessage(password: string) {
 async function postAuthRequest(path: string, payload: Record<string, string>) {
   const response = await fetch(path, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
@@ -106,6 +109,19 @@ async function postAuthRequest(path: string, payload: Record<string, string>) {
     user: data.user,
     resendAvailableAt: data.resendAvailableAt,
   };
+}
+
+async function parseApiResponse<T>(response: Response) {
+  const data = (await response.json().catch(() => ({
+    ok: false,
+    message: "A network error occurred. Please try again.",
+  }))) as T & { ok?: boolean; message?: string };
+
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.message || "Something went wrong. Please try again.");
+  }
+
+  return data;
 }
 
 function getInitials(name: string) {
@@ -289,13 +305,23 @@ type ParsedDocumentMetadata = {
 export function CareerVaultPlatform() {
   const [currentUser, setCurrentUser] = useState<UserProfile>(defaultUser);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authMessage, setAuthMessage] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const [resendAvailableAt, setResendAvailableAt] = useState(0);
   const [resendSeconds, setResendSeconds] = useState(0);
-  const [screen, setScreen] = useState<Screen>("dashboard");
+  const [screen, setScreen] = useState<Screen>(() => {
+    if (typeof window === "undefined") {
+      return "dashboard";
+    }
+
+    const savedScreen = window.localStorage.getItem("careervault-screen");
+    return savedScreen && ["dashboard", "documents", "upload"].includes(savedScreen)
+      ? (savedScreen as Screen)
+      : "dashboard";
+  });
   const [documents, setDocuments] = useState<ManagedDocument[]>(
     initialDocuments.map(toManagedDocument),
   );
@@ -319,6 +345,7 @@ export function CareerVaultPlatform() {
   });
   const [parsedUpload, setParsedUpload] = useState<ParsedDocumentMetadata | null>(null);
   const [isParsingUpload, setIsParsingUpload] = useState(false);
+  const [isSavingUpload, setIsSavingUpload] = useState(false);
 
   const selectedDocument = documents.find((document) => document.id === selectedDocumentId);
 
@@ -354,6 +381,46 @@ export function CareerVaultPlatform() {
   }, [categoryFilter, documents, query, sortMode]);
 
   const recentlyUploaded = documents;
+
+  async function loadDocuments() {
+    const response = await fetch("/api/documents", {
+      credentials: "include",
+    });
+    const data = await parseApiResponse<{
+      documents: ManagedDocument[];
+    }>(response);
+    setDocuments(data.documents);
+  }
+
+  useEffect(() => {
+    async function restoreSession() {
+      try {
+        const response = await fetch("/api/auth/session", {
+          credentials: "include",
+        });
+        const data = await parseApiResponse<{
+          user: UserProfile;
+        }>(response);
+        setCurrentUser(data.user);
+        setIsAuthenticated(true);
+        await loadDocuments();
+      } catch {
+        setCurrentUser(defaultUser);
+        setIsAuthenticated(false);
+        setDocuments([]);
+      } finally {
+        setIsSessionLoading(false);
+      }
+    }
+
+    restoreSession();
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated && screen !== "viewer") {
+      window.localStorage.setItem("careervault-screen", screen);
+    }
+  }, [isAuthenticated, screen]);
 
   useEffect(() => {
     if (!toast) {
@@ -522,12 +589,19 @@ export function CareerVaultPlatform() {
 
     setCurrentUser(result.user);
     setIsAuthenticated(true);
+    await loadDocuments();
     setAuthMessage("");
     setToast(`Welcome back, ${result.user.name}.`);
   }
 
-  function signOut() {
+  async function signOut() {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => null);
     setIsAuthenticated(false);
+    setCurrentUser(defaultUser);
+    setDocuments([]);
     setScreen("dashboard");
     setSelectedDocumentId(null);
     setDocumentToEdit(null);
@@ -548,14 +622,26 @@ export function CareerVaultPlatform() {
     setSelectedDocumentId(null);
   }
 
-  function openDocument(document: ManagedDocument) {
-    setDocuments((current) =>
-      current.map((item) =>
-        item.id === document.id
-          ? { ...item, lastViewed: new Date().toISOString().slice(0, 10) }
-          : item,
-      ),
-    );
+  async function openDocument(document: ManagedDocument) {
+    fetch(`/api/documents/${document.id}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action: "viewed" }),
+    })
+      .then((response) =>
+        parseApiResponse<{
+          document: ManagedDocument;
+        }>(response),
+      )
+      .then((data) => {
+        setDocuments((current) =>
+          current.map((item) => (item.id === data.document.id ? data.document : item)),
+        );
+      })
+      .catch(() => null);
     setSelectedDocumentId(document.id);
     setZoom(100);
     if (document.fileUrl) {
@@ -604,8 +690,20 @@ export function CareerVaultPlatform() {
     setToast(`Download started for ${document.fileName}.`);
   }
 
-  function confirmDelete() {
+  async function confirmDelete() {
     if (!documentToDelete) {
+      return;
+    }
+
+    try {
+      await parseApiResponse(
+        await fetch(`/api/documents/${documentToDelete.id}`, {
+          method: "DELETE",
+          credentials: "include",
+        }),
+      );
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Unable to delete document.");
       return;
     }
 
@@ -621,14 +719,30 @@ export function CareerVaultPlatform() {
     setDocumentToEdit(null);
   }
 
-  function saveEditedDocument(updatedDocument: ManagedDocument) {
-    setDocuments((current) =>
-      current.map((document) =>
-        document.id === updatedDocument.id ? updatedDocument : document,
-      ),
-    );
-    setDocumentToEdit(null);
-    setToast(`${updatedDocument.fileName} updated successfully.`);
+  async function saveEditedDocument(updatedDocument: ManagedDocument) {
+    try {
+      const data = await parseApiResponse<{
+        document: ManagedDocument;
+      }>(
+        await fetch(`/api/documents/${updatedDocument.id}`, {
+          method: "PATCH",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(updatedDocument),
+        }),
+      );
+      setDocuments((current) =>
+        current.map((document) =>
+          document.id === data.document.id ? data.document : document,
+        ),
+      );
+      setDocumentToEdit(null);
+      setToast(`${data.document.fileName} updated successfully.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Unable to update document.");
+    }
   }
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -671,7 +785,7 @@ export function CareerVaultPlatform() {
     setToast("Document metadata extracted successfully.");
   }
 
-  function handleUpload(event: FormEvent<HTMLFormElement>) {
+  async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!uploadFile) {
       setToast("Please select a document before uploading.");
@@ -680,12 +794,10 @@ export function CareerVaultPlatform() {
 
     const extension = uploadFile.name.split(".").pop()?.toUpperCase() ?? "PDF";
     const parsedDocument = parsedUpload ?? extractMetadataFromText(uploadFile, "");
-    const originalFileUrl = URL.createObjectURL(uploadFile);
     const reviewedCompany = uploadForm.companyName || parsedDocument.companyName;
     const reviewedDesignation = uploadForm.designation || parsedDocument.designation;
     const reviewedPeriod = uploadForm.employmentPeriod || parsedDocument.employmentPeriod;
-    const newDocument: ManagedDocument = {
-      id: `doc-${Date.now()}`,
+    const newDocument: Omit<ManagedDocument, "id" | "uploadedAt" | "fileUrl"> = {
       companyName: reviewedCompany,
       employeeName: currentUser.name,
       designation: reviewedDesignation,
@@ -694,7 +806,6 @@ export function CareerVaultPlatform() {
       documentType: uploadForm.category as ManagedDocument["documentType"],
       fileName: uploadForm.name || `${reviewedCompany} ${uploadForm.category}`,
       fileSize: `${Math.max(uploadFile.size / 1024 / 1024, 0.1).toFixed(1)} MB`,
-      uploadedAt: new Date().toISOString().slice(0, 10),
       status: "Verified",
       description:
         uploadForm.description ||
@@ -705,10 +816,32 @@ export function CareerVaultPlatform() {
       employmentPeriod: reviewedPeriod,
       salaryMonth: uploadForm.salaryMonth || parsedDocument.salaryMonth,
       originalFileName: uploadFile.name,
-      fileUrl: originalFileUrl,
     };
 
-    setDocuments((current) => [newDocument, ...current]);
+    setIsSavingUpload(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", uploadFile);
+      formData.append("metadata", JSON.stringify(newDocument));
+      const data = await parseApiResponse<{
+        document: ManagedDocument;
+      }>(
+        await fetch("/api/documents", {
+          method: "POST",
+          credentials: "include",
+          body: formData,
+        }),
+      );
+      setDocuments((current) => [data.document, ...current]);
+      setToast("Upload successful. Document added to your vault.");
+      setScreen("documents");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Upload failed. Please try again.");
+      return;
+    } finally {
+      setIsSavingUpload(false);
+    }
+
     setUploadFile(null);
     setParsedUpload(null);
     setUploadForm({
@@ -720,8 +853,16 @@ export function CareerVaultPlatform() {
       employmentPeriod: "",
       salaryMonth: "",
     });
-    setToast("Upload successful. Document added to your vault.");
-    setScreen("documents");
+  }
+
+  if (isSessionLoading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#0d172b] px-4 text-white">
+        <div className="rounded-[20px] border border-white/10 bg-white/5 px-6 py-5 text-center shadow-2xl shadow-black/20">
+          <p className="text-sm font-semibold text-blue-100">Restoring your session...</p>
+        </div>
+      </main>
+    );
   }
 
   if (!isAuthenticated) {
@@ -796,6 +937,7 @@ export function CareerVaultPlatform() {
             <UploadScreen
               form={uploadForm}
               isParsingUpload={isParsingUpload}
+              isSavingUpload={isSavingUpload}
               onFileChange={handleFileChange}
               onSubmit={handleUpload}
               setForm={setUploadForm}
@@ -1361,29 +1503,42 @@ function DashboardScreen({
   user: UserProfile;
 }) {
   const companies = Array.from(
-    new Map(documents.map((document) => [document.companyName, document])).values(),
+    new Map(
+      documents.map((document) => [
+        document.companyName.trim().toLowerCase(),
+        document,
+      ]),
+    ).values(),
   );
-  const verifiedRecords = documents.filter((document) => document.status === "Verified").length;
+  const uploadedFiles = documents.length;
+  const candidates = new Set(
+    documents.map((document) => document.employeeName.trim().toLowerCase()).filter(Boolean),
+  ).size;
 
   return (
     <div className="space-y-6">
       <DashboardHero onUpload={() => setScreen("upload")} user={user} />
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        <StatCard
-          icon={<FileText className="h-4 w-4" />}
-          label="Total documents"
-          value={documents.length.toString()}
-        />
-        <StatCard
-          icon={<ShieldCheck className="h-4 w-4" />}
-          label="Verified records"
-          value={verifiedRecords.toString()}
-        />
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           icon={<BriefcaseBusiness className="h-4 w-4" />}
-          label="Companies"
+          label="Total companies"
           value={companies.length.toString()}
+        />
+        <StatCard
+          icon={<User className="h-4 w-4" />}
+          label="Total candidates"
+          value={candidates.toString()}
+        />
+        <StatCard
+          icon={<FileText className="h-4 w-4" />}
+          label="Total resumes"
+          value={uploadedFiles.toString()}
+        />
+        <StatCard
+          icon={<CloudUpload className="h-4 w-4" />}
+          label="Uploaded files"
+          value={uploadedFiles.toString()}
         />
       </section>
 
@@ -1642,6 +1797,7 @@ function DocumentsScreen({
 function UploadScreen({
   form,
   isParsingUpload,
+  isSavingUpload,
   onFileChange,
   onSubmit,
   setForm,
@@ -1657,6 +1813,7 @@ function UploadScreen({
     salaryMonth: string;
   };
   isParsingUpload: boolean;
+  isSavingUpload: boolean;
   onFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   setForm: (form: {
@@ -1756,8 +1913,11 @@ function UploadScreen({
                 ))}
               </select>
             </label>
-            <button className="h-11 w-full rounded-[20px] bg-blue-600 text-sm font-semibold text-white shadow-md shadow-blue-600/20 transition hover:bg-blue-700">
-              Upload Document
+            <button
+              className="h-11 w-full rounded-[20px] bg-blue-600 text-sm font-semibold text-white shadow-md shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              disabled={isParsingUpload || isSavingUpload}
+            >
+              {isSavingUpload ? "Saving Document..." : "Upload Document"}
             </button>
           </div>
         </div>
