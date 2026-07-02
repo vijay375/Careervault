@@ -1,0 +1,10 @@
+{
+  "name": "careervault-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix careervault run dev",
+    "build": "npm --prefix careervault run build",
+    "start": "npm --prefix careervault run start",
+    "lint": "npm --prefix careervault run lint"
+  }
+}
