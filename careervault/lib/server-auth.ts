@@ -10,6 +10,7 @@ import nodemailer from "nodemailer";
 import { Pool } from "pg";
 import type { QueryResultRow } from "pg";
 import type { VaultDocument } from "@/lib/careervault-data";
+import { getSmtpConfig, getSmtpConfigStatus, buildPasswordResetEmailContent, sendViaBrevoApi } from "@/lib/smtp-config";
 
 const scrypt = promisify(scryptCallback);
 const resetExpiryMs = 10 * 60 * 1000;
@@ -46,14 +47,14 @@ type PasswordResetRecord = {
 type EmailDeliveryResult =
   | {
       ok: true;
-      mode: "smtp";
+      mode: "smtp" | "brevo-api";
       messageId?: string;
       accepted: string[];
       rejected: string[];
     }
   | {
       ok: false;
-      mode: "unconfigured";
+      mode: "unconfigured" | "failed";
       message: string;
     };
 
@@ -132,31 +133,7 @@ export function getPasswordPolicyMessage(password: string) {
 }
 
 export function getEmailServiceStatus() {
-  const host = process.env.SMTP_HOST;
-  const port = process.env.SMTP_PORT;
-  const userName = process.env.SMTP_USER;
-  const password = process.env.SMTP_PASSWORD;
-  const from = process.env.SMTP_FROM;
-  const missing = [
-    ["SMTP_HOST", host],
-    ["SMTP_PORT", port],
-    ["SMTP_USER", userName],
-    ["SMTP_PASSWORD", password],
-    ["SMTP_FROM", from],
-  ]
-    .filter(([, value]) => !value)
-    .map(([name]) => name);
-
-  return {
-    configured: missing.length === 0,
-    provider: "smtp",
-    hostConfigured: Boolean(host),
-    port: port ? Number(port) : null,
-    userConfigured: Boolean(userName),
-    passwordConfigured: Boolean(password),
-    fromConfigured: Boolean(from),
-    missing,
-  };
+  return getSmtpConfigStatus();
 }
 
 export async function createAccount({
@@ -741,13 +718,54 @@ async function sendPasswordResetEmail(
   code: string,
 ): Promise<EmailDeliveryResult> {
   const status = getEmailServiceStatus();
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const userName = process.env.SMTP_USER;
-  const password = process.env.SMTP_PASSWORD;
-  const from = process.env.SMTP_FROM || "CareerVault <no-reply@careervault.local>";
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
+  const content = buildPasswordResetEmailContent(
+    user.name,
+    code,
+    passwordResetConfig.resetExpiryMinutes,
+    appUrl,
+  );
 
-  if (!status.configured || !host || !userName || !password) {
+  if (!status.configured) {
+    console.error("CareerVault email delivery skipped: email provider is not fully configured.", {
+      missing: status.missing,
+      provider: status.provider,
+    });
+    return {
+      ok: false,
+      mode: "unconfigured",
+      message:
+        "Email service is not configured. Please configure SMTP or Brevo API environment variables before requesting a reset code.",
+    };
+  }
+
+  if (status.provider === "brevo-api") {
+    try {
+      const result = await sendViaBrevoApi({ to: user.email, content });
+      console.info("CareerVault password reset email sent via Brevo API.", {
+        to: user.email,
+        messageId: result.messageId,
+      });
+      return result;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown Brevo API error";
+      console.error("CareerVault password reset email failed via Brevo API.", {
+        to: user.email,
+        error: detail,
+      });
+      return {
+        ok: false,
+        mode: "failed",
+        message:
+          "We could not send the verification email right now. Please try again shortly or contact support if the issue continues.",
+      };
+    }
+  }
+
+  const smtp = getSmtpConfig();
+  if (!smtp) {
     return {
       ok: false,
       mode: "unconfigured",
@@ -756,33 +774,60 @@ async function sendPasswordResetEmail(
     };
   }
 
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: {
-      user: userName,
-      pass: password,
-    },
-  });
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
+      auth: {
+        user: smtp.user,
+        pass: smtp.password,
+      },
+    });
 
-  await transporter.verify();
+    await transporter.verify();
 
-  const result = await transporter.sendMail({
-    from,
-    to: user.email,
-    subject: "Your CareerVault password reset code",
-    text: `Hello ${user.name},\n\nYour CareerVault verification code is ${code}. It expires in ${passwordResetConfig.resetExpiryMinutes} minutes.\n\nIf you did not request this, you can ignore this email.`,
-    html: `<p>Hello ${escapeHtml(user.name)},</p><p>Your CareerVault verification code is <strong>${code}</strong>.</p><p>It expires in ${passwordResetConfig.resetExpiryMinutes} minutes.</p><p>If you did not request this, you can ignore this email.</p>`,
-  });
+    const result = await transporter.sendMail({
+      from: smtp.from,
+      to: user.email,
+      subject: content.subject,
+      text: content.text,
+      html: content.html,
+    });
 
-  return {
-    ok: true,
-    mode: "smtp",
-    messageId: result.messageId,
-    accepted: result.accepted.map(String),
-    rejected: result.rejected.map(String),
-  };
+    console.info("CareerVault password reset email sent via SMTP.", {
+      to: user.email,
+      messageId: result.messageId,
+      accepted: result.accepted,
+      rejected: result.rejected,
+    });
+
+    return {
+      ok: true,
+      mode: "smtp",
+      messageId: result.messageId,
+      accepted: result.accepted.map(String),
+      rejected: result.rejected.map(String),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Unknown SMTP error";
+    console.error("CareerVault password reset email failed via SMTP.", {
+      to: user.email,
+      host: smtp.host,
+      port: smtp.port,
+      error: detail,
+    });
+
+    const authHint = detail.includes("535")
+      ? " Check that SMTP_USER is the Brevo SMTP login from Settings → SMTP & API, and SMTP_PASSWORD is your xsmtpsib SMTP key."
+      : "";
+
+    return {
+      ok: false,
+      mode: "failed",
+      message: `We could not send the verification email right now.${authHint} Please try again shortly or contact support if the issue continues.`,
+    };
+  }
 }
 
 function toPublicUser(user: UserRecord): PublicUser {
@@ -830,13 +875,4 @@ function toDateOnly(value: Date | string) {
   const day = String(value.getDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }

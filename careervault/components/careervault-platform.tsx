@@ -24,11 +24,10 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   documentTypes,
   formatDate,
-  initialDocuments,
   VaultDocument,
 } from "@/lib/careervault-data";
 
@@ -69,6 +68,29 @@ const defaultUser = {
 
 const allowedExtensions = ["pdf", "doc", "docx", "jpg", "jpeg", "png"];
 const resendCooldownMs = 60 * 1000;
+const globalSearchResultLimit = 8;
+
+function documentMatchesSearch(document: ManagedDocument, normalizedQuery: string) {
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return (
+    document.fileName.toLowerCase().includes(normalizedQuery) ||
+    document.companyName.toLowerCase().includes(normalizedQuery) ||
+    document.designation.toLowerCase().includes(normalizedQuery) ||
+    document.employmentPeriod?.toLowerCase().includes(normalizedQuery) ||
+    document.documentType.toLowerCase().includes(normalizedQuery)
+  );
+}
+
+function getDocumentLocation(document: ManagedDocument, recentDocumentIds: Set<string>) {
+  if (recentDocumentIds.has(document.id)) {
+    return "Dashboard · Recent Uploads";
+  }
+
+  return "Documents Page";
+}
 
 function getPasswordPolicyMessage(password: string) {
   if (password.length < 8) {
@@ -131,6 +153,171 @@ function getInitials(name: string) {
     .join("")
     .slice(0, 2)
     .toUpperCase();
+}
+
+function getFirstName(name: string) {
+  return name.trim().split(/\s+/)[0] || "";
+}
+
+function getWelcomeGreeting(name: string) {
+  const firstName = getFirstName(name);
+  return firstName ? `Welcome Back, ${firstName}!` : "Welcome Back!";
+}
+
+function parseEmploymentDate(value?: string) {
+  if (!value?.trim()) {
+    return null;
+  }
+
+  const normalized = value.trim();
+  const dayMonthYear = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dayMonthYear) {
+    return new Date(
+      Number(dayMonthYear[3]),
+      Number(dayMonthYear[2]) - 1,
+      Number(dayMonthYear[1]),
+    ).getTime();
+  }
+
+  const isoMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return new Date(`${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`).getTime();
+  }
+
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function formatEmploymentPeriodDate(value?: string) {
+  const timestamp = parseEmploymentDate(value);
+  if (timestamp === null) {
+    return null;
+  }
+
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(timestamp));
+}
+
+function formatEmploymentPeriodText(period: string) {
+  const parts = period.split(/\s[-–]\s/);
+  if (parts.length !== 2) {
+    return period.trim();
+  }
+
+  const start = formatEmploymentPeriodDate(parts[0]) ?? parts[0].trim();
+  const endPart = parts[1].trim();
+
+  if (/present/i.test(endPart)) {
+    return start;
+  }
+
+  const end = formatEmploymentPeriodDate(endPart) ?? endPart;
+  return `${start} - ${end}`;
+}
+
+function getEmploymentPeriodDisplay(document: ManagedDocument) {
+  if (document.employmentPeriod?.trim()) {
+    return formatEmploymentPeriodText(document.employmentPeriod);
+  }
+
+  const start = formatEmploymentPeriodDate(document.joiningDate) ?? "—";
+  const end = document.relievingDate
+    ? formatEmploymentPeriodDate(document.relievingDate)
+    : null;
+
+  if (!end) {
+    return start;
+  }
+
+  return `${start} - ${end}`;
+}
+
+function isPresentEmployment(document: ManagedDocument) {
+  if (document.relievingDate?.trim()) {
+    return false;
+  }
+
+  const period = document.employmentPeriod?.trim() ?? "";
+  if (!period) {
+    return true;
+  }
+
+  const endPart = period.split(/\s[-–]\s/)[1]?.trim() ?? "";
+  return !endPart || /present/i.test(endPart);
+}
+
+function getEmploymentEndSortValue(document: ManagedDocument) {
+  const relievingTimestamp = parseEmploymentDate(document.relievingDate);
+  if (relievingTimestamp !== null) {
+    return relievingTimestamp;
+  }
+
+  const periodEnd = document.employmentPeriod?.split(/\s[-–]\s/)[1]?.trim();
+  if (periodEnd && !/present/i.test(periodEnd)) {
+    return parseEmploymentDate(periodEnd) ?? 0;
+  }
+
+  return parseEmploymentDate(document.joiningDate) ?? 0;
+}
+
+function sortEmploymentRecords(documents: ManagedDocument[]) {
+  return [...documents].sort((first, second) => {
+    const endDifference = getEmploymentEndSortValue(second) - getEmploymentEndSortValue(first);
+    if (endDifference !== 0) {
+      return endDifference;
+    }
+
+    return (
+      (parseEmploymentDate(second.joiningDate) ?? 0) -
+      (parseEmploymentDate(first.joiningDate) ?? 0)
+    );
+  });
+}
+
+const employmentTimelineDocumentTypes = new Set(["Experience Letter", "Relieving Letter"]);
+
+function buildEmploymentTimelineRecords(documents: ManagedDocument[]) {
+  const eligibleDocuments = documents.filter(
+    (document) =>
+      employmentTimelineDocumentTypes.has(document.documentType) &&
+      !isPresentEmployment(document),
+  );
+
+  const recordsByCompany = new Map<string, ManagedDocument>();
+
+  for (const document of eligibleDocuments) {
+    const companyKey = document.companyName.trim().toLowerCase();
+    const existing = recordsByCompany.get(companyKey);
+
+    if (!existing) {
+      recordsByCompany.set(companyKey, document);
+      continue;
+    }
+
+    if (
+      document.documentType === "Relieving Letter" &&
+      existing.documentType !== "Relieving Letter"
+    ) {
+      recordsByCompany.set(companyKey, document);
+      continue;
+    }
+
+    if (
+      existing.documentType === "Relieving Letter" &&
+      document.documentType !== "Relieving Letter"
+    ) {
+      continue;
+    }
+
+    if (getEmploymentEndSortValue(document) > getEmploymentEndSortValue(existing)) {
+      recordsByCompany.set(companyKey, document);
+    }
+  }
+
+  return sortEmploymentRecords(Array.from(recordsByCompany.values()));
 }
 
 function titleCase(value: string) {
@@ -309,6 +496,8 @@ export function CareerVaultPlatform() {
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authMessage, setAuthMessage] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+  const [authFormKey, setAuthFormKey] = useState(0);
+  const [loginPrefillEmail, setLoginPrefillEmail] = useState("");
   const [resetEmail, setResetEmail] = useState("");
   const [resendAvailableAt, setResendAvailableAt] = useState(0);
   const [resendSeconds, setResendSeconds] = useState(0);
@@ -322,14 +511,14 @@ export function CareerVaultPlatform() {
       ? (savedScreen as Screen)
       : "dashboard";
   });
-  const [documents, setDocuments] = useState<ManagedDocument[]>(
-    initialDocuments.map(toManagedDocument),
-  );
+  const [documents, setDocuments] = useState<ManagedDocument[]>([]);
+  const [isDocumentsLoading, setIsDocumentsLoading] = useState(false);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [documentToDelete, setDocumentToDelete] = useState<ManagedDocument | null>(null);
   const [documentToEdit, setDocumentToEdit] = useState<ManagedDocument | null>(null);
   const [toast, setToast] = useState("");
-  const [query, setQuery] = useState("");
+  const [globalQuery, setGlobalQuery] = useState("");
+  const [documentQuery, setDocumentQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [sortMode, setSortMode] = useState<SortMode>("Newest");
   const [zoom, setZoom] = useState(100);
@@ -350,15 +539,9 @@ export function CareerVaultPlatform() {
   const selectedDocument = documents.find((document) => document.id === selectedDocumentId);
 
   const filteredDocuments = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
+    const normalizedQuery = documentQuery.trim().toLowerCase();
     const matchingDocuments = documents.filter((document) => {
-      const matchesSearch =
-        !normalizedQuery ||
-        document.fileName.toLowerCase().includes(normalizedQuery) ||
-        document.companyName.toLowerCase().includes(normalizedQuery) ||
-        document.designation.toLowerCase().includes(normalizedQuery) ||
-        document.employmentPeriod?.toLowerCase().includes(normalizedQuery) ||
-        document.documentType.toLowerCase().includes(normalizedQuery);
+      const matchesSearch = documentMatchesSearch(document, normalizedQuery);
       const matchesCategory =
         categoryFilter === "All" || document.documentType === categoryFilter;
 
@@ -378,18 +561,55 @@ export function CareerVaultPlatform() {
         new Date(second.uploadedAt).getTime() - new Date(first.uploadedAt).getTime()
       );
     });
-  }, [categoryFilter, documents, query, sortMode]);
+  }, [categoryFilter, documentQuery, documents, sortMode]);
 
   const recentlyUploaded = documents;
 
+  const recentDocumentIds = useMemo(
+    () =>
+      new Set(
+        [...documents]
+          .sort(
+            (first, second) =>
+              new Date(second.uploadedAt).getTime() - new Date(first.uploadedAt).getTime(),
+          )
+          .slice(0, 4)
+          .map((document) => document.id),
+      ),
+    [documents],
+  );
+
+  const globalSearchResults = useMemo(() => {
+    const normalizedQuery = globalQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    return documents
+      .filter((document) => documentMatchesSearch(document, normalizedQuery))
+      .slice(0, globalSearchResultLimit);
+  }, [documents, globalQuery]);
+
+  function handleGlobalSearchSelect(document: ManagedDocument) {
+    setGlobalQuery("");
+    setDocumentQuery(document.fileName);
+    setScreen("documents");
+  }
+
   async function loadDocuments() {
-    const response = await fetch("/api/documents", {
-      credentials: "include",
-    });
-    const data = await parseApiResponse<{
-      documents: ManagedDocument[];
-    }>(response);
-    setDocuments(data.documents);
+    setIsDocumentsLoading(true);
+
+    try {
+      const response = await fetch("/api/documents", {
+        credentials: "include",
+      });
+      const data = await parseApiResponse<{
+        documents: ManagedDocument[];
+      }>(response);
+      setDocuments(data.documents);
+    } finally {
+      setIsDocumentsLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -495,6 +715,8 @@ export function CareerVaultPlatform() {
       setAuthMessage(result.message);
 
       if (result.ok) {
+        setLoginPrefillEmail(email);
+        setAuthFormKey((key) => key + 1);
         setAuthMode("login");
       }
 
@@ -570,6 +792,8 @@ export function CareerVaultPlatform() {
         setResetEmail("");
         setResendAvailableAt(0);
         setResendSeconds(0);
+        setLoginPrefillEmail("");
+        setAuthFormKey((key) => key + 1);
         setAuthMode("login");
       }
 
@@ -602,6 +826,7 @@ export function CareerVaultPlatform() {
     setIsAuthenticated(false);
     setCurrentUser(defaultUser);
     setDocuments([]);
+    setIsDocumentsLoading(false);
     setScreen("dashboard");
     setSelectedDocumentId(null);
     setDocumentToEdit(null);
@@ -869,8 +1094,10 @@ export function CareerVaultPlatform() {
     return (
       <>
         <AuthScreen
+          authFormKey={authFormKey}
           authMode={authMode}
           isLoading={authLoading}
+          loginPrefillEmail={loginPrefillEmail}
           message={authMessage}
           onAuthModeChange={(mode) => {
             setAuthMode(mode);
@@ -880,6 +1107,10 @@ export function CareerVaultPlatform() {
               setResetEmail("");
               setResendAvailableAt(0);
               setResendSeconds(0);
+            }
+            if (mode === "login" || mode === "signup") {
+              setLoginPrefillEmail("");
+              setAuthFormKey((key) => key + 1);
             }
           }}
           onResendCode={handleResendCode}
@@ -894,9 +1125,12 @@ export function CareerVaultPlatform() {
   return (
     <main className="min-h-screen bg-[#f6f8fb] text-slate-950">
       <TopNav
+        globalSearchResults={globalSearchResults}
+        onGlobalSearchSelect={handleGlobalSearchSelect}
         onSignOut={signOut}
-        query={query}
-        setQuery={setQuery}
+        query={globalQuery}
+        recentDocumentIds={recentDocumentIds}
+        setQuery={setGlobalQuery}
         user={currentUser}
       />
       <MobileNav activeScreen={screen} setScreen={setScreen} />
@@ -908,6 +1142,7 @@ export function CareerVaultPlatform() {
           {screen === "dashboard" && (
             <DashboardScreen
               documents={documents}
+              isLoading={isDocumentsLoading && documents.length === 0}
               onDownload={downloadDocument}
               onEdit={setDocumentToEdit}
               onOpen={openDocument}
@@ -925,9 +1160,9 @@ export function CareerVaultPlatform() {
               onDownload={downloadDocument}
               onEdit={setDocumentToEdit}
               onOpen={openDocument}
-              query={query}
+              query={documentQuery}
               setCategoryFilter={setCategoryFilter}
-              setQuery={setQuery}
+              setQuery={setDocumentQuery}
               setSortMode={setSortMode}
               sortMode={sortMode}
             />
@@ -981,16 +1216,20 @@ export function CareerVaultPlatform() {
 }
 
 function AuthScreen({
+  authFormKey,
   authMode,
   isLoading,
+  loginPrefillEmail,
   message,
   onAuthModeChange,
   onResendCode,
   onSubmit,
   resendSeconds,
 }: {
+  authFormKey: number;
   authMode: AuthMode;
   isLoading: boolean;
+  loginPrefillEmail: string;
   message: string;
   onAuthModeChange: (mode: AuthMode) => void;
   onResendCode: () => void;
@@ -999,6 +1238,11 @@ function AuthScreen({
 }) {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  useEffect(() => {
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+  }, [authMode, authFormKey]);
   const isSignup = authMode === "signup";
   const isLogin = authMode === "login";
   const isForgot = authMode === "forgot";
@@ -1074,11 +1318,12 @@ function AuthScreen({
             </p>
           )}
 
-          <div className="mt-6 space-y-4">
+          <div className="mt-6 space-y-4" key={`${authMode}-${authFormKey}`}>
             {isSignup && (
               <label className="block">
                 <span className="text-sm font-semibold text-slate-700">Full name</span>
                 <input
+                  autoComplete="name"
                   className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
                   name="name"
                   placeholder="Enter your full name"
@@ -1091,7 +1336,9 @@ function AuthScreen({
               <label className="block">
                 <span className="text-sm font-semibold text-slate-700">Email</span>
                 <input
+                  autoComplete="email"
                   className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
+                  defaultValue={isLogin ? loginPrefillEmail : undefined}
                   name="email"
                   placeholder="Enter your email"
                   required
@@ -1107,6 +1354,7 @@ function AuthScreen({
                 </span>
                 <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
                   <input
+                    autoComplete={isSignup ? "new-password" : isReset ? "new-password" : "current-password"}
                     className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
                     minLength={8}
                     name="password"
@@ -1164,6 +1412,7 @@ function AuthScreen({
                   </span>
                   <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
                     <input
+                      autoComplete="new-password"
                       className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
                       minLength={8}
                       name="confirmPassword"
@@ -1234,39 +1483,120 @@ function AuthScreen({
 }
 
 function TopNav({
+  globalSearchResults,
+  onGlobalSearchSelect,
   onSignOut,
   query,
+  recentDocumentIds,
   setQuery,
   user,
 }: {
+  globalSearchResults: ManagedDocument[];
+  onGlobalSearchSelect: (document: ManagedDocument) => void;
   onSignOut: () => void;
   query: string;
+  recentDocumentIds: Set<string>;
   setQuery: (value: string) => void;
   user: UserProfile;
 }) {
   const initials = getInitials(user.name);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const normalizedQuery = query.trim();
+  const showSearchResults = isSearchOpen && normalizedQuery.length > 0;
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (
+        searchContainerRef.current &&
+        !searchContainerRef.current.contains(event.target as Node)
+      ) {
+        setIsSearchOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, []);
+
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur-xl lg:pl-64">
       <div className="mx-auto flex h-16 max-w-[1180px] items-center gap-4 px-4 sm:px-6 lg:px-8">
         <div className="flex min-w-[220px] items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-md shadow-blue-600/20">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-md shadow-blue-600/20">
             CV
           </div>
-          <div>
-            <p className="text-sm font-bold leading-4">CareerVault</p>
-            <p className="text-xs text-slate-500">Secure document hub</p>
-          </div>
+          <p className="text-sm font-bold leading-none text-slate-950">CareerVault</p>
         </div>
 
-        <label className="mx-auto hidden h-10 w-full max-w-xl items-center gap-2 rounded-[20px] border border-slate-200 bg-slate-50 px-3 text-slate-500 transition focus-within:border-blue-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100 md:flex">
-          <Search className="h-4 w-4" />
-          <input
-            className="h-full min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search documents..."
-            value={query}
-          />
-        </label>
+        <div
+          className="relative mx-auto hidden w-full max-w-xl md:block"
+          ref={searchContainerRef}
+        >
+          <label className="flex h-10 w-full items-center gap-2 rounded-[20px] border border-slate-200 bg-slate-50 px-3 text-slate-500 transition focus-within:border-blue-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100">
+            <Search className="h-4 w-4 shrink-0" />
+            <input
+              aria-autocomplete="list"
+              aria-controls="global-search-results"
+              aria-expanded={showSearchResults}
+              className="h-full min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setIsSearchOpen(true);
+              }}
+              onFocus={() => setIsSearchOpen(true)}
+              placeholder="Search documents..."
+              role="combobox"
+              type="search"
+              value={query}
+            />
+          </label>
+
+          {showSearchResults && (
+            <div
+              className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-xl shadow-slate-200/70"
+              id="global-search-results"
+              role="listbox"
+            >
+              {globalSearchResults.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-slate-500">
+                  No documents found in your repository.
+                </p>
+              ) : (
+                <ul className="max-h-80 overflow-y-auto py-2">
+                  {globalSearchResults.map((document) => (
+                    <li key={document.id}>
+                      <button
+                        className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                        onClick={() => {
+                          onGlobalSearchSelect(document);
+                          setIsSearchOpen(false);
+                        }}
+                        role="option"
+                        type="button"
+                      >
+                        <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[20px] bg-blue-50 text-blue-700">
+                          <FileText className="h-4 w-4" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-semibold text-slate-900">
+                            {document.fileName}
+                          </span>
+                          <span className="mt-0.5 block truncate text-xs text-slate-500">
+                            {document.companyName} · {document.documentType}
+                          </span>
+                          <span className="mt-1 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                            {getDocumentLocation(document, recentDocumentIds)}
+                          </span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="ml-auto flex items-center gap-3">
           <button
@@ -1296,7 +1626,6 @@ function TopNav({
               >
                 <div className="mb-2 rounded-[20px] bg-slate-50 px-3 py-2">
                   <p className="text-sm font-bold text-slate-900">{user.name}</p>
-                  <p className="text-xs text-slate-500">Secure Document Hub</p>
                 </div>
                 <DropdownItem icon={<User className="h-4 w-4" />} label="My Profile" />
                 <DropdownItem
@@ -1362,13 +1691,10 @@ function Sidebar({
   return (
     <aside className="fixed bottom-0 left-0 top-0 z-50 hidden w-64 bg-[#0d172b] p-6 text-white shadow-2xl lg:flex lg:flex-col">
       <div className="flex items-center gap-4">
-        <div className="flex h-14 w-14 items-center justify-center rounded-[20px] bg-blue-500 text-xl font-bold shadow-lg shadow-blue-500/30">
+        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-blue-500 text-xl font-bold shadow-lg shadow-blue-500/30">
           CV
         </div>
-        <div>
-          <p className="text-lg font-bold leading-5">CareerVault</p>
-          <p className="mt-1 text-sm text-slate-400">Secure Document Hub</p>
-        </div>
+        <p className="text-lg font-bold leading-none">CareerVault</p>
       </div>
 
       <nav className="mt-10 space-y-3">
@@ -1472,7 +1798,7 @@ function SidebarItem({
 }) {
   return (
     <button
-      className={`flex w-full items-center gap-4 rounded-[20px] px-5 py-4 text-base font-semibold transition ${
+      className={`flex w-full items-center gap-4 rounded-[10px] px-5 py-4 text-base font-semibold transition ${
         active
           ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30"
           : "text-slate-400 hover:bg-white/6 hover:text-white"
@@ -1487,6 +1813,7 @@ function SidebarItem({
 
 function DashboardScreen({
   documents,
+  isLoading,
   onDownload,
   onEdit,
   onOpen,
@@ -1495,6 +1822,7 @@ function DashboardScreen({
   user,
 }: {
   documents: ManagedDocument[];
+  isLoading: boolean;
   onDownload: (document: ManagedDocument) => void;
   onEdit: (document: ManagedDocument) => void;
   onOpen: (document: ManagedDocument) => void;
@@ -1510,47 +1838,64 @@ function DashboardScreen({
       ]),
     ).values(),
   );
-  const uploadedFiles = documents.length;
-  const candidates = new Set(
-    documents.map((document) => document.employeeName.trim().toLowerCase()).filter(Boolean),
+  const totalDocuments = documents.length;
+  const totalCompanies = companies.length;
+  const totalJobPositions = new Set(
+    documents
+      .map((document) => document.designation.trim().toLowerCase())
+      .filter(Boolean),
   ).size;
 
   return (
     <div className="space-y-6">
       <DashboardHero onUpload={() => setScreen("upload")} user={user} />
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          icon={<BriefcaseBusiness className="h-4 w-4" />}
-          label="Total companies"
-          value={companies.length.toString()}
-        />
-        <StatCard
-          icon={<User className="h-4 w-4" />}
-          label="Total candidates"
-          value={candidates.toString()}
-        />
-        <StatCard
-          icon={<FileText className="h-4 w-4" />}
-          label="Total resumes"
-          value={uploadedFiles.toString()}
-        />
-        <StatCard
-          icon={<CloudUpload className="h-4 w-4" />}
-          label="Uploaded files"
-          value={uploadedFiles.toString()}
-        />
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {isLoading ? (
+          <>
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+          </>
+        ) : (
+          <>
+            <StatCard
+              icon={<FileText className="h-4 w-4" />}
+              label="Total Documents"
+              value={totalDocuments.toString()}
+            />
+            <StatCard
+              icon={<BriefcaseBusiness className="h-4 w-4" />}
+              label="Total Companies"
+              value={totalCompanies.toString()}
+            />
+            <StatCard
+              icon={<User className="h-4 w-4" />}
+              label="Total Job Positions"
+              value={totalJobPositions.toString()}
+            />
+          </>
+        )}
       </section>
 
       <section className="grid gap-5 xl:grid-cols-[1.35fr_0.95fr]">
-        <RecentUploadsCard
-          documents={recentlyUploaded}
-          onDownload={onDownload}
-          onEdit={onEdit}
-          onOpen={onOpen}
-          onViewAll={() => setScreen("documents")}
-        />
-        <EmploymentTimeline documents={companies} />
+        {isLoading ? (
+          <>
+            <DashboardPanelSkeleton rows={3} />
+            <DashboardPanelSkeleton rows={4} />
+          </>
+        ) : (
+          <>
+            <RecentUploadsCard
+              documents={recentlyUploaded}
+              onDownload={onDownload}
+              onEdit={onEdit}
+              onOpen={onOpen}
+              onViewAll={() => setScreen("documents")}
+            />
+            <EmploymentTimeline documents={documents} />
+          </>
+        )}
       </section>
     </div>
   );
@@ -1564,7 +1909,7 @@ function DashboardHero({ onUpload, user }: { onUpload: () => void; user: UserPro
       <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="max-w-3xl text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
-            Good afternoon, {user.name.split(" ")[0]}!
+            {getWelcomeGreeting(user.name)}
           </h1>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-blue-50 sm:text-base">
             Here&apos;s your overview, your employment history organized and ready to
@@ -1638,7 +1983,7 @@ function RecentUploadsCard({
               </div>
               <p className="mt-1 text-sm text-slate-500">{document.designation}</p>
               <p className="mt-1 truncate text-xs text-slate-500">
-                {document.fileName} · {document.fileSize} · {formatDate(document.uploadedAt)}
+                {document.fileName} · {document.fileSize}
               </p>
             </div>
 
@@ -1677,6 +2022,11 @@ function RecentUploadsCard({
 }
 
 function EmploymentTimeline({ documents }: { documents: ManagedDocument[] }) {
+  const timelineRecords = useMemo(
+    () => buildEmploymentTimelineRecords(documents),
+    [documents],
+  );
+
   return (
     <section className="rounded-[20px] border border-slate-200/80 bg-white p-6 shadow-xl shadow-slate-200/60">
       <h2 className="text-xl font-bold tracking-tight text-slate-950">
@@ -1685,9 +2035,9 @@ function EmploymentTimeline({ documents }: { documents: ManagedDocument[] }) {
       <p className="mt-1 text-sm text-slate-500">Your career, in order.</p>
 
       <div className="mt-6 max-h-[388px] space-y-7 overflow-y-auto pr-1">
-        {documents.map((document, index) => (
-          <div className="relative flex gap-4" key={document.companyName}>
-            {index !== documents.length - 1 && (
+        {timelineRecords.map((document, index) => (
+          <div className="relative flex gap-4" key={document.id}>
+            {index !== timelineRecords.length - 1 && (
               <span className="absolute left-[7px] top-5 h-[calc(100%+1rem)] w-px bg-slate-200" />
             )}
             <span className="relative mt-1 h-4 w-4 shrink-0 rounded-full bg-blue-500 shadow-md shadow-blue-500/30 ring-4 ring-blue-50" />
@@ -1695,13 +2045,28 @@ function EmploymentTimeline({ documents }: { documents: ManagedDocument[] }) {
               <h3 className="font-bold text-slate-950">{document.companyName}</h3>
               <p className="mt-1 text-sm text-slate-500">{document.designation}</p>
               <p className="mt-1 text-sm text-slate-500">
-                {formatDate(document.joiningDate)} - {formatDate(document.relievingDate)}
+                {getEmploymentPeriodDisplay(document)}
               </p>
             </div>
           </div>
         ))}
       </div>
     </section>
+  );
+}
+
+function DropdownSelect({
+  className = "",
+  ...props
+}: React.ComponentProps<"select">) {
+  return (
+    <div className={`relative ${/\bw-full\b/.test(className) ? "w-full" : ""}`}>
+      <select {...props} className={`appearance-none pl-3 pr-10 ${className}`} />
+      <ChevronDown
+        aria-hidden="true"
+        className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+      />
+    </div>
   );
 }
 
@@ -1730,6 +2095,8 @@ function DocumentsScreen({
   setSortMode: (mode: SortMode) => void;
   sortMode: SortMode;
 }) {
+  const hasActiveFilters = query.trim().length > 0 || categoryFilter !== "All";
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -1740,17 +2107,14 @@ function DocumentsScreen({
 
       <section className="rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm">
         <div className="grid gap-3 lg:grid-cols-[1fr_220px_180px_180px]">
-          <label className="flex h-11 items-center gap-2 rounded-[20px] border border-slate-200 bg-slate-50 px-3 text-slate-500 focus-within:border-blue-300 focus-within:bg-white">
-            <Search className="h-4 w-4" />
-            <input
-              className="h-full min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none"
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search Documents"
-              value={query}
-            />
-          </label>
-          <select
-            className="h-11 rounded-[20px] border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-300"
+          <SearchField
+            className="h-11 rounded-[20px] border border-slate-200 bg-slate-50 px-3 text-slate-500 focus-within:border-blue-300 focus-within:bg-white"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search Documents"
+            value={query}
+          />
+          <DropdownSelect
+            className="h-11 rounded-[20px] border border-slate-200 bg-white text-sm outline-none focus:border-blue-300"
             onChange={(event) => setCategoryFilter(event.target.value)}
             value={categoryFilter}
           >
@@ -1758,7 +2122,7 @@ function DocumentsScreen({
             {documentTypes.map((type) => (
               <option key={type}>{type}</option>
             ))}
-          </select>
+          </DropdownSelect>
           <button
             className="h-11 rounded-[20px] border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
             onClick={() => setSortMode("Newest")}
@@ -1778,17 +2142,34 @@ function DocumentsScreen({
         </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {documents.map((document) => (
-          <DocumentCard
-            document={document}
-            key={document.id}
-            onDelete={onDelete}
-            onDownload={onDownload}
-            onEdit={onEdit}
-            onOpen={onOpen}
-          />
-        ))}
+      <section className="min-h-[320px]">
+        {documents.length === 0 ? (
+          <div className="flex min-h-[320px] items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-white px-6 py-12 text-center">
+            <div>
+              <p className="text-sm font-semibold text-slate-700">
+                {hasActiveFilters ? "No documents match your search." : "No documents yet."}
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                {hasActiveFilters
+                  ? "Try adjusting your search or filters."
+                  : "Upload a document to get started."}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {documents.map((document) => (
+              <DocumentCard
+                document={document}
+                key={document.id}
+                onDelete={onDelete}
+                onDownload={onDownload}
+                onEdit={onEdit}
+                onOpen={onOpen}
+              />
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
@@ -1870,26 +2251,26 @@ function UploadScreen({
             <FormField
               label="Document Name"
               onChange={(value) => setForm({ ...form, name: value })}
-              placeholder="e.g. BluePeak Experience Letter"
+              placeholder="Enter document name"
               value={form.name}
             />
             <FormField
               label="Company Name"
               onChange={(value) => setForm({ ...form, companyName: value })}
-              placeholder="Extracted company name"
+              placeholder="Enter company name"
               value={form.companyName}
             />
             <FormField
-              label="Designation / Job Title"
+              label="Designation"
               onChange={(value) => setForm({ ...form, designation: value })}
-              placeholder="Extracted designation"
+              placeholder="Enter job title"
               value={form.designation}
             />
             <FormField
               label={
                 form.category === "Salary Slip"
                   ? "Salary Month"
-                  : "Employment Duration / Working Period"
+                  : "Employment Period"
               }
               onChange={(value) =>
                 setForm(
@@ -1898,20 +2279,20 @@ function UploadScreen({
                     : { ...form, employmentPeriod: value },
                 )
               }
-              placeholder={form.category === "Salary Slip" ? "January 2026" : "Jan 2024 - Present"}
+              placeholder={form.category === "Salary Slip" ? "January 2026" : "e.g., Jan 2026 – Present"}
               value={form.category === "Salary Slip" ? form.salaryMonth : form.employmentPeriod}
             />
             <label className="block">
               <span className="text-sm font-medium text-slate-700">Document Category</span>
-              <select
-                className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
+              <DropdownSelect
+                className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 text-sm outline-none focus:border-blue-300"
                 onChange={(event) => setForm({ ...form, category: event.target.value })}
                 value={form.category}
               >
                 {documentTypes.map((type) => (
                   <option key={type}>{type}</option>
                 ))}
-              </select>
+              </DropdownSelect>
             </label>
             <button
               className="h-11 w-full rounded-[20px] bg-blue-600 text-sm font-semibold text-white shadow-md shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
@@ -2074,6 +2455,69 @@ function StatCard({
   );
 }
 
+function StatCardSkeleton() {
+  return (
+    <div
+      aria-hidden="true"
+      className="rounded-[24px] border border-slate-200/80 bg-white p-5 shadow-xl shadow-slate-200/50"
+    >
+      <div className="h-10 w-10 animate-pulse rounded-[20px] bg-slate-100" />
+      <div className="mt-5 h-4 w-28 animate-pulse rounded bg-slate-100" />
+      <div className="mt-2 h-8 w-14 animate-pulse rounded bg-slate-100" />
+    </div>
+  );
+}
+
+function DashboardPanelSkeleton({ rows }: { rows: number }) {
+  return (
+    <section
+      aria-hidden="true"
+      className="rounded-[20px] border border-slate-200/80 bg-white p-6 shadow-xl shadow-slate-200/60"
+    >
+      <div className="h-6 w-40 animate-pulse rounded bg-slate-100" />
+      <div className="mt-2 h-4 w-56 animate-pulse rounded bg-slate-100" />
+      <div className="mt-6 space-y-3">
+        {Array.from({ length: rows }).map((_, index) => (
+          <div
+            className="h-[88px] animate-pulse rounded-[20px] bg-slate-100"
+            key={index}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SearchField({
+  className = "",
+  inputClassName = "",
+  onChange,
+  onFocus,
+  placeholder,
+  value,
+}: {
+  className?: string;
+  inputClassName?: string;
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onFocus?: () => void;
+  placeholder?: string;
+  value: string;
+}) {
+  return (
+    <label className={`flex items-center gap-2 ${className}`}>
+      <Search className="h-4 w-4 shrink-0" />
+      <input
+        className={`h-full min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400 ${inputClassName}`}
+        onChange={onChange}
+        onFocus={onFocus}
+        placeholder={placeholder}
+        type="search"
+        value={value}
+      />
+    </label>
+  );
+}
+
 function DocumentCard({
   document,
   onDelete,
@@ -2088,7 +2532,7 @@ function DocumentCard({
   onOpen: (document: ManagedDocument) => void;
 }) {
   return (
-    <article className="rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+    <article className="rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm transition-[border-color,box-shadow] duration-200 hover:border-blue-200 hover:shadow-md">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p className="truncate font-semibold">{document.fileName}</p>
@@ -2292,6 +2736,7 @@ function EditDocumentDialog({
                     className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
                     defaultValue={document.fileName}
                     name="fileName"
+                    placeholder="Enter document name"
                   />
                 </label>
                 <label className="block">
@@ -2300,27 +2745,29 @@ function EditDocumentDialog({
                     className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
                     defaultValue={document.companyName}
                     name="companyName"
+                    placeholder="Enter company name"
                   />
                 </label>
                 <label className="block">
-                  <span className="text-sm font-semibold text-slate-700">Designation / Job Title</span>
+                  <span className="text-sm font-semibold text-slate-700">Designation</span>
                   <input
                     className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
                     defaultValue={document.designation}
                     name="designation"
+                    placeholder="Enter job title"
                   />
                 </label>
                 <label className="block">
                   <span className="text-sm font-semibold text-slate-700">Document Type</span>
-                  <select
-                    className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
+                  <DropdownSelect
+                    className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 text-sm outline-none focus:border-blue-300"
                     defaultValue={document.documentType}
                     name="documentType"
                   >
                     {documentTypes.map((type) => (
                       <option key={type}>{type}</option>
                     ))}
-                  </select>
+                  </DropdownSelect>
                 </label>
                 <label className="block">
                   <span className="text-sm font-semibold text-slate-700">Employment Period</span>
@@ -2328,7 +2775,7 @@ function EditDocumentDialog({
                     className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
                     defaultValue={document.employmentPeriod}
                     name="employmentPeriod"
-                    placeholder="Jan 2024 - Present"
+                    placeholder="e.g., Jan 2026 – Present"
                   />
                 </label>
                 <label className="block sm:col-span-2">

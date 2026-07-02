@@ -9,7 +9,8 @@ export async function POST(request: NextRequest) {
     const result = await requestPasswordReset(String(body.email || ""));
 
     return NextResponse.json(result, { status: result.status });
-  } catch {
+  } catch (error) {
+    console.error("CareerVault forgot-password request failed.", error);
     return NextResponse.json(
       {
         ok: false,

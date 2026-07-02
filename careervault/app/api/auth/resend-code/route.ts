@@ -9,7 +9,8 @@ export async function POST(request: NextRequest) {
     const result = await resendPasswordResetCode(String(body.email || ""));
 
     return NextResponse.json(result, { status: result.status });
-  } catch {
+  } catch (error) {
+    console.error("CareerVault resend-code request failed.", error);
     return NextResponse.json(
       {
         ok: false,
