@@ -209,12 +209,6 @@ export async function createAccount({
   };
 }
 
-export async function checkDatabaseConnection() {
-  await ensureSchema();
-  const result = await query<{ ok: number }>("select 1 as ok");
-  return result.rows[0];
-}
-
 export async function authenticateUser(email: string, password: string) {
   await ensureSchema();
   const normalizedEmail = normalizeEmail(email);
