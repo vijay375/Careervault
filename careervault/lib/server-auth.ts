@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   createHash,
@@ -11,7 +12,10 @@ import { promisify } from "node:util";
 import nodemailer from "nodemailer";
 
 const scrypt = promisify(scryptCallback);
-const dataDir = path.join(process.cwd(), ".data");
+const dataDir =
+  process.env.VERCEL === "1"
+    ? path.join(tmpdir(), "careervault")
+    : path.join(process.cwd(), ".data");
 const databasePath = path.join(dataDir, "careervault-auth.json");
 const resetExpiryMs = 10 * 60 * 1000;
 const resendCooldownMs = 60 * 1000;
