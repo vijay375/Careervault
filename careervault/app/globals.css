@@ -23,3 +23,47 @@ input,
 select {
   font: inherit;
 }
+
+@keyframes careervault-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes careervault-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.careervault-shimmer {
+  background-color: #f1f5f9;
+  background-image: linear-gradient(
+    90deg,
+    #f1f5f9 0%,
+    #e2e8f0 42%,
+    #f8fafc 50%,
+    #e2e8f0 58%,
+    #f1f5f9 100%
+  );
+  background-size: 200% 100%;
+  animation: careervault-shimmer 1.5s ease-in-out infinite;
+}
+
+.careervault-fade-in {
+  animation: careervault-fade-in 250ms ease-out both;
+}
+
+.careervault-screen-enter {
+  animation: careervault-fade-in 250ms ease-out both;
+}

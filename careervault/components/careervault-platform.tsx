@@ -71,6 +71,26 @@ const defaultUser = {
 const allowedExtensions = ["pdf", "doc", "docx", "jpg", "jpeg", "png"];
 const resendCooldownMs = 60 * 1000;
 const globalSearchResultLimit = 8;
+const loadingRevealDelayMs = 200;
+
+function useDelayedLoading(isLoading: boolean) {
+  const [showLoading, setShowLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setShowLoading(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setShowLoading(true);
+    }, loadingRevealDelayMs);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isLoading]);
+
+  return isLoading && showLoading;
+}
 
 function documentMatchesSearch(document: ManagedDocument, normalizedQuery: string) {
   if (!normalizedQuery) {
@@ -543,6 +563,7 @@ export function CareerVaultPlatform() {
   const [isSavingUpload, setIsSavingUpload] = useState(false);
 
   const selectedDocument = documents.find((document) => document.id === selectedDocumentId);
+  const isInitialContentLoading = isDocumentsLoading && documents.length === 0;
 
   const filteredDocuments = useMemo(() => {
     const normalizedQuery = documentQuery.trim().toLowerCase();
@@ -1175,60 +1196,76 @@ export function CareerVaultPlatform() {
           }`}
         >
           {screen === "dashboard" && (
-            <DashboardScreen
-              documents={documents}
-              isLoading={isDocumentsLoading && documents.length === 0}
-              onDownload={downloadDocument}
-              onEdit={setDocumentToEdit}
-              onOpen={openDocument}
-              recentlyUploaded={recentlyUploaded}
-              setScreen={setScreen}
-              user={currentUser}
-            />
+            <ScreenTransition screenKey="dashboard">
+              <DashboardScreen
+                documents={documents}
+                isLoading={isInitialContentLoading}
+                onDownload={downloadDocument}
+                onEdit={setDocumentToEdit}
+                onOpen={openDocument}
+                recentlyUploaded={recentlyUploaded}
+                setScreen={setScreen}
+                user={currentUser}
+              />
+            </ScreenTransition>
           )}
 
           {screen === "documents" && (
-            <DocumentsScreen
-              categoryFilter={categoryFilter}
-              documents={filteredDocuments}
-              onDelete={setDocumentToDelete}
-              onDownload={downloadDocument}
-              onEdit={setDocumentToEdit}
-              onOpen={openDocument}
-              query={documentQuery}
-              setCategoryFilter={setCategoryFilter}
-              setQuery={setDocumentQuery}
-              setSortMode={setSortMode}
-              sortMode={sortMode}
-            />
+            <ScreenTransition screenKey="documents">
+              <DocumentsScreen
+                categoryFilter={categoryFilter}
+                documents={filteredDocuments}
+                isLoading={isInitialContentLoading}
+                onDelete={setDocumentToDelete}
+                onDownload={downloadDocument}
+                onEdit={setDocumentToEdit}
+                onOpen={openDocument}
+                query={documentQuery}
+                setCategoryFilter={setCategoryFilter}
+                setQuery={setDocumentQuery}
+                setSortMode={setSortMode}
+                sortMode={sortMode}
+              />
+            </ScreenTransition>
           )}
 
           {screen === "upload" && (
-            <UploadScreen
-              form={uploadForm}
-              isParsingUpload={isParsingUpload}
-              isSavingUpload={isSavingUpload}
-              onFileChange={handleFileChange}
-              onSubmit={handleUpload}
-              setForm={setUploadForm}
-              uploadFile={uploadFile}
-            />
+            <ScreenTransition screenKey="upload">
+              <UploadScreen
+                form={uploadForm}
+                isParsingUpload={isParsingUpload}
+                isSavingUpload={isSavingUpload}
+                onFileChange={handleFileChange}
+                onSubmit={handleUpload}
+                setForm={setUploadForm}
+                uploadFile={uploadFile}
+              />
+            </ScreenTransition>
           )}
 
           {screen === "viewer" && selectedDocument && (
-            <DocumentViewerScreen
-              document={selectedDocument}
-              onBack={goToDocuments}
-              onDelete={setDocumentToDelete}
-              onDownload={downloadDocument}
-              onEdit={setDocumentToEdit}
-              setZoom={setZoom}
-              zoom={zoom}
-            />
+            <ScreenTransition screenKey={`viewer-${selectedDocument.id}`}>
+              <DocumentViewerScreen
+                document={selectedDocument}
+                onBack={goToDocuments}
+                onDelete={setDocumentToDelete}
+                onDownload={downloadDocument}
+                onEdit={setDocumentToEdit}
+                setZoom={setZoom}
+                zoom={zoom}
+              />
+            </ScreenTransition>
           )}
 
           {screen === "profile" && (
-            <ProfileScreen onBack={closeProfile} onSignOut={signOut} user={currentUser} />
+            <ScreenTransition screenKey="profile">
+              <ProfileScreen
+                isLoading={isInitialContentLoading}
+                onBack={closeProfile}
+                onSignOut={signOut}
+                user={currentUser}
+              />
+            </ScreenTransition>
           )}
         </section>
       </div>
@@ -1994,15 +2031,18 @@ function SidebarItem({
 }
 
 function ProfileScreen({
+  isLoading,
   onBack,
   onSignOut,
   user,
 }: {
+  isLoading: boolean;
   onBack: () => void;
   onSignOut: () => void;
   user: UserProfile;
 }) {
   const initials = getInitials(user.name);
+  const showSkeleton = useDelayedLoading(isLoading);
 
   return (
     <>
@@ -2017,7 +2057,12 @@ function ProfileScreen({
         </button>
       </header>
 
-      <div className="space-y-8 pb-4">
+      {isLoading && !showSkeleton ? (
+        <div aria-hidden="true" className="min-h-[420px]" />
+      ) : showSkeleton ? (
+        <ProfileScreenSkeleton />
+      ) : (
+        <div className="careervault-fade-in space-y-8 pb-4">
         <section className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-center gap-4">
           <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-linear-to-br from-blue-600 to-violet-600 text-lg font-semibold text-white">
@@ -2057,7 +2102,8 @@ function ProfileScreen({
           Sign Out
         </button>
       </section>
-      </div>
+        </div>
+      )}
     </>
   );
 }
@@ -2099,6 +2145,16 @@ function DashboardScreen({
   setScreen: (screen: Screen) => void;
   user: UserProfile;
 }) {
+  const showSkeleton = useDelayedLoading(isLoading);
+
+  if (isLoading && !showSkeleton) {
+    return <div aria-hidden="true" className="min-h-[720px]" />;
+  }
+
+  if (showSkeleton) {
+    return <DashboardScreenSkeleton />;
+  }
+
   const companies = Array.from(
     new Map(
       documents.map((document) => [
@@ -2116,55 +2172,36 @@ function DashboardScreen({
   ).size;
 
   return (
-    <div className="space-y-6">
+    <div className="careervault-fade-in space-y-6">
       <DashboardHero onUpload={() => setScreen("upload")} user={user} />
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {isLoading ? (
-          <>
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-            <StatCardSkeleton />
-          </>
-        ) : (
-          <>
-            <StatCard
-              icon={<FileText className="h-4 w-4" />}
-              label="Total Documents"
-              value={totalDocuments.toString()}
-            />
-            <StatCard
-              icon={<BriefcaseBusiness className="h-4 w-4" />}
-              label="Total Companies"
-              value={totalCompanies.toString()}
-            />
-            <StatCard
-              icon={<User className="h-4 w-4" />}
-              label="Total Job Positions"
-              value={totalJobPositions.toString()}
-            />
-          </>
-        )}
+        <StatCard
+          icon={<FileText className="h-4 w-4" />}
+          label="Total Documents"
+          value={totalDocuments.toString()}
+        />
+        <StatCard
+          icon={<BriefcaseBusiness className="h-4 w-4" />}
+          label="Total Companies"
+          value={totalCompanies.toString()}
+        />
+        <StatCard
+          icon={<User className="h-4 w-4" />}
+          label="Total Job Positions"
+          value={totalJobPositions.toString()}
+        />
       </section>
 
       <section className="grid gap-5 xl:grid-cols-[1.35fr_0.95fr]">
-        {isLoading ? (
-          <>
-            <DashboardPanelSkeleton rows={3} />
-            <DashboardPanelSkeleton rows={4} />
-          </>
-        ) : (
-          <>
-            <RecentUploadsCard
-              documents={recentlyUploaded}
-              onDownload={onDownload}
-              onEdit={onEdit}
-              onOpen={onOpen}
-              onViewAll={() => setScreen("documents")}
-            />
-            <EmploymentTimeline documents={documents} />
-          </>
-        )}
+        <RecentUploadsCard
+          documents={recentlyUploaded}
+          onDownload={onDownload}
+          onEdit={onEdit}
+          onOpen={onOpen}
+          onViewAll={() => setScreen("documents")}
+        />
+        <EmploymentTimeline documents={documents} />
       </section>
     </div>
   );
@@ -2344,6 +2381,7 @@ function DropdownSelect({
 function DocumentsScreen({
   categoryFilter,
   documents,
+  isLoading,
   onDelete,
   onDownload,
   onEdit,
@@ -2356,6 +2394,7 @@ function DocumentsScreen({
 }: {
   categoryFilter: string;
   documents: ManagedDocument[];
+  isLoading: boolean;
   onDelete: (document: ManagedDocument) => void;
   onDownload: (document: ManagedDocument) => void;
   onEdit: (document: ManagedDocument) => void;
@@ -2367,6 +2406,7 @@ function DocumentsScreen({
   sortMode: SortMode;
 }) {
   const hasActiveFilters = query.trim().length > 0 || categoryFilter !== "All";
+  const showSkeleton = useDelayedLoading(isLoading);
 
   return (
     <div className="space-y-5">
@@ -2414,8 +2454,16 @@ function DocumentsScreen({
       </section>
 
       <section className="min-h-[320px]">
-        {documents.length === 0 ? (
-          <div className="flex min-h-[320px] items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-white px-6 py-12 text-center">
+        {isLoading && !showSkeleton ? (
+          <div aria-hidden="true" className="min-h-[320px]" />
+        ) : showSkeleton ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <DocumentCardSkeleton key={index} />
+            ))}
+          </div>
+        ) : documents.length === 0 ? (
+          <div className="careervault-fade-in flex min-h-[320px] items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-white px-6 py-12 text-center">
             <div>
               <p className="text-sm font-semibold text-slate-700">
                 {hasActiveFilters ? "No documents match your search." : "No documents yet."}
@@ -2428,7 +2476,7 @@ function DocumentsScreen({
             </div>
           </div>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="careervault-fade-in grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {documents.map((document) => (
               <DocumentCard
                 document={document}
@@ -2732,9 +2780,9 @@ function StatCardSkeleton() {
       aria-hidden="true"
       className="rounded-[24px] border border-slate-200/80 bg-white p-5 shadow-xl shadow-slate-200/50"
     >
-      <div className="h-10 w-10 animate-pulse rounded-[20px] bg-slate-100" />
-      <div className="mt-5 h-4 w-28 animate-pulse rounded bg-slate-100" />
-      <div className="mt-2 h-8 w-14 animate-pulse rounded bg-slate-100" />
+      <ShimmerBlock className="h-10 w-10 rounded-[20px]" />
+      <ShimmerBlock className="mt-5 h-4 w-28" />
+      <ShimmerBlock className="mt-2 h-8 w-14" />
     </div>
   );
 }
@@ -2745,17 +2793,141 @@ function DashboardPanelSkeleton({ rows }: { rows: number }) {
       aria-hidden="true"
       className="rounded-[20px] border border-slate-200/80 bg-white p-6 shadow-xl shadow-slate-200/60"
     >
-      <div className="h-6 w-40 animate-pulse rounded bg-slate-100" />
-      <div className="mt-2 h-4 w-56 animate-pulse rounded bg-slate-100" />
+      <ShimmerBlock className="h-6 w-40" />
+      <ShimmerBlock className="mt-2 h-4 w-56" />
       <div className="mt-6 space-y-3">
         {Array.from({ length: rows }).map((_, index) => (
-          <div
-            className="h-[88px] animate-pulse rounded-[20px] bg-slate-100"
-            key={index}
-          />
+          <RecentUploadItemSkeleton key={index} />
         ))}
       </div>
     </section>
+  );
+}
+
+function DashboardHeroSkeleton() {
+  return (
+    <section
+      aria-hidden="true"
+      className="overflow-hidden rounded-[20px] border border-slate-200/80 bg-white p-7 shadow-xl shadow-slate-200/60 sm:p-8"
+    >
+      <ShimmerBlock className="h-10 w-3/4 max-w-md" />
+      <ShimmerBlock className="mt-4 h-4 w-full max-w-xl" />
+      <ShimmerBlock className="mt-2 h-4 w-2/3 max-w-lg" />
+      <ShimmerBlock className="mt-6 h-12 w-44 rounded-[20px]" />
+    </section>
+  );
+}
+
+function DashboardScreenSkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading dashboard" className="space-y-6" role="status">
+      <span className="sr-only">Loading dashboard</span>
+      <DashboardHeroSkeleton />
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <StatCardSkeleton />
+        <StatCardSkeleton />
+        <StatCardSkeleton />
+      </section>
+      <section className="grid gap-5 xl:grid-cols-[1.35fr_0.95fr]">
+        <DashboardPanelSkeleton rows={3} />
+        <DashboardPanelSkeleton rows={4} />
+      </section>
+    </div>
+  );
+}
+
+function RecentUploadItemSkeleton() {
+  return (
+    <div className="flex flex-col gap-3 rounded-[20px] border border-slate-200 bg-slate-50/70 p-4 lg:grid lg:grid-cols-[auto_1fr] lg:gap-4">
+      <ShimmerBlock className="h-14 w-14 shrink-0 rounded-[20px]" />
+      <div className="min-w-0 flex-1 space-y-2">
+        <ShimmerBlock className="h-4 w-32" />
+        <ShimmerBlock className="h-3.5 w-24" />
+        <ShimmerBlock className="h-3 w-40" />
+        <div className="flex gap-2 pt-1">
+          <ShimmerBlock className="h-9 w-9 rounded-[20px]" />
+          <ShimmerBlock className="h-9 w-9 rounded-[20px]" />
+          <ShimmerBlock className="h-9 w-9 rounded-[20px]" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DocumentCardSkeleton() {
+  return (
+    <article
+      aria-hidden="true"
+      className="rounded-[20px] border border-slate-200 bg-white p-4 shadow-sm"
+    >
+      <div className="flex items-start justify-between gap-4">
+        <ShimmerBlock className="h-5 w-[58%] max-w-[180px]" />
+        <ShimmerBlock className="h-6 w-12 rounded-full" />
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <div key={index}>
+            <ShimmerBlock className="h-3 w-16" />
+            <ShimmerBlock className="mt-2 h-4 w-full" />
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center gap-2">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <ShimmerBlock className="h-9 w-9 rounded-[20px]" key={index} />
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ProfileScreenSkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading profile" className="space-y-8 pb-4" role="status">
+      <span className="sr-only">Loading profile</span>
+      <section className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center gap-4">
+          <ShimmerBlock className="h-14 w-14 shrink-0 rounded-full" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <ShimmerBlock className="h-5 w-40" />
+            <ShimmerBlock className="h-4 w-52" />
+          </div>
+        </div>
+      </section>
+      <section>
+        <ShimmerBlock className="mx-1 h-3 w-16" />
+        <div className="mt-3 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-sm">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div
+              className="flex items-center gap-3 border-b border-slate-100 px-4 py-4 last:border-b-0"
+              key={index}
+            >
+              <ShimmerBlock className="h-4 w-4 rounded" />
+              <ShimmerBlock className="h-4 w-32" />
+            </div>
+          ))}
+        </div>
+      </section>
+      <ShimmerBlock className="h-[52px] w-full rounded-[20px]" />
+    </div>
+  );
+}
+
+function ShimmerBlock({ className = "" }: { className?: string }) {
+  return <div className={`careervault-shimmer ${className}`.trim()} />;
+}
+
+function ScreenTransition({
+  children,
+  screenKey,
+}: {
+  children: React.ReactNode;
+  screenKey: string;
+}) {
+  return (
+    <div className="careervault-screen-enter" key={screenKey}>
+      {children}
+    </div>
   );
 }
 
