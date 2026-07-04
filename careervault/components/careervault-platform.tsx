@@ -1147,6 +1147,7 @@ export function CareerVaultPlatform() {
         globalSearchResults={globalSearchResults}
         hideMobileBar={screen === "profile"}
         onGlobalSearchSelect={handleGlobalSearchSelect}
+        onNavigateDashboard={() => setScreen("dashboard")}
         onOpenProfile={openProfile}
         onSignOut={signOut}
         query={globalQuery}
@@ -1159,7 +1160,11 @@ export function CareerVaultPlatform() {
       <div className="mx-auto flex max-w-[1440px]">
         <Sidebar activeScreen={screen} setScreen={setScreen} user={currentUser} />
 
-        <section className="min-w-0 flex-1 px-4 py-5 pb-24 sm:px-6 lg:ml-64 lg:px-8 lg:pb-5">
+        <section
+          className={`min-w-0 flex-1 px-4 pb-24 sm:px-6 lg:ml-64 lg:px-8 lg:pb-5 ${
+            screen === "profile" ? "pt-0 lg:py-5" : "py-5"
+          }`}
+        >
           {screen === "dashboard" && (
             <DashboardScreen
               documents={documents}
@@ -1511,6 +1516,7 @@ function TopNav({
   globalSearchResults,
   hideMobileBar,
   onGlobalSearchSelect,
+  onNavigateDashboard,
   onOpenProfile,
   onSignOut,
   query,
@@ -1521,6 +1527,7 @@ function TopNav({
   globalSearchResults: ManagedDocument[];
   hideMobileBar?: boolean;
   onGlobalSearchSelect: (document: ManagedDocument) => void;
+  onNavigateDashboard: () => void;
   onOpenProfile: () => void;
   onSignOut: () => void;
   query: string;
@@ -1604,16 +1611,23 @@ function TopNav({
   return (
     <header
       className={`sticky top-0 z-40 bg-white/90 backdrop-blur-xl lg:border-b lg:pl-64 ${
-        hideMobileBar ? "border-b-0 lg:border-b" : "border-b border-slate-200"
+        hideMobileBar
+          ? "hidden border-b-0 lg:block lg:border-b"
+          : "border-b border-slate-200"
       }`}
     >
       <div className="mx-auto hidden h-16 max-w-[1180px] items-center gap-4 px-4 sm:px-6 lg:flex lg:px-8">
-        <div className="flex min-w-[220px] items-center gap-3">
+        <button
+          aria-label="Go to dashboard"
+          className="flex min-w-[220px] items-center gap-3 text-left"
+          onClick={onNavigateDashboard}
+          type="button"
+        >
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-md shadow-blue-600/20">
             CV
           </div>
           <p className="text-sm font-bold leading-none text-slate-950">CareerVault</p>
-        </div>
+        </button>
 
         <div className="relative mx-auto w-full max-w-xl" ref={desktopSearchRef}>
           <label className="flex h-10 w-full items-center gap-2 rounded-[20px] border border-slate-200 bg-slate-50 px-3 text-slate-500 transition focus-within:border-blue-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100">
@@ -1691,12 +1705,14 @@ function TopNav({
 
       {!hideMobileBar && (
         <div className="mx-auto flex h-14 items-center gap-2 px-3 sm:gap-2.5 sm:px-4 lg:hidden">
-          <div
-            aria-label="CareerVault"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white shadow-md shadow-blue-600/20"
+          <button
+            aria-label="Go to dashboard"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white shadow-md shadow-blue-600/20 transition active:scale-[0.98]"
+            onClick={onNavigateDashboard}
+            type="button"
           >
             CV
-          </div>
+          </button>
 
           <div className="relative min-w-0 flex-1" ref={mobileSearchRef}>
             <label className="flex h-10 w-full items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-slate-500 shadow-sm transition focus-within:border-blue-300 focus-within:ring-2 focus-within:ring-blue-100">
@@ -1925,9 +1941,9 @@ function ProfileScreen({
 
   return (
     <>
-      <header className="sticky top-0 z-30 -mx-4 mb-4 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:hidden">
+      <header className="sticky top-0 z-40 -mx-4 mb-4 flex h-14 items-center border-b border-slate-200 bg-white/90 px-3 backdrop-blur-xl sm:-mx-6 sm:px-4 lg:hidden">
         <button
-          className="flex min-h-10 items-center gap-2 rounded-[20px] px-1 text-sm font-semibold text-slate-700 transition active:bg-slate-50"
+          className="flex h-10 items-center gap-2 rounded-[20px] px-1 text-sm font-semibold text-slate-700 transition active:bg-slate-50"
           onClick={onBack}
           type="button"
         >
@@ -2250,8 +2266,8 @@ function DropdownSelect({
   ...props
 }: React.ComponentProps<"select">) {
   return (
-    <div className={`relative ${/\bw-full\b/.test(className) ? "w-full" : ""}`}>
-      <select {...props} className={`appearance-none pl-3 pr-10 ${className}`} />
+    <div className="relative w-full min-w-0">
+      <select {...props} className={`w-full appearance-none pl-3 pr-10 ${className}`} />
       <ChevronDown
         aria-hidden="true"
         className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
@@ -2304,7 +2320,7 @@ function DocumentsScreen({
             value={query}
           />
           <DropdownSelect
-            className="h-11 rounded-[20px] border border-slate-200 bg-white text-sm outline-none focus:border-blue-300"
+            className="h-11 w-full rounded-[20px] border border-slate-200 bg-white text-sm outline-none focus:border-blue-300"
             onChange={(event) => setCategoryFilter(event.target.value)}
             value={categoryFilter}
           >
@@ -2981,21 +2997,21 @@ function EditDocumentDialog({
 
               <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-between">
                 <button
-                  className="h-10 rounded-[20px] bg-red-50 px-4 text-sm font-semibold text-red-600 hover:bg-red-100"
+                  className="h-11 w-full rounded-[20px] bg-red-50 px-4 text-sm font-semibold text-red-600 hover:bg-red-100 sm:h-10 sm:w-auto"
                   onClick={() => onDelete(document)}
                   type="button"
                 >
                   Delete Document
                 </button>
-                <div className="flex gap-3">
+                <div className="grid w-full grid-cols-2 gap-3 sm:flex sm:w-auto">
                   <button
-                    className="h-10 rounded-[20px] border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    className="h-11 w-full min-w-0 rounded-[20px] border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 sm:h-10 sm:w-auto"
                     onClick={onCancel}
                     type="button"
                   >
                     Cancel
                   </button>
-                  <button className="h-10 rounded-[20px] bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700">
+                  <button className="h-11 w-full min-w-0 rounded-[20px] bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 sm:h-10 sm:w-auto">
                     Save Changes
                   </button>
                 </div>
