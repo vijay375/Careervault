@@ -495,6 +495,7 @@ export function CareerVaultPlatform() {
   const [currentUser, setCurrentUser] = useState<UserProfile>(defaultUser);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
+  const [sessionLoadProgress, setSessionLoadProgress] = useState(0);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authMessage, setAuthMessage] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -633,22 +634,32 @@ export function CareerVaultPlatform() {
 
   useEffect(() => {
     async function restoreSession() {
+      setSessionLoadProgress(12);
+
       try {
+        setSessionLoadProgress(28);
         const response = await fetch("/api/auth/session", {
           credentials: "include",
         });
+        setSessionLoadProgress(52);
         const data = await parseApiResponse<{
           user: UserProfile;
         }>(response);
         setCurrentUser(data.user);
         setIsAuthenticated(true);
+        setSessionLoadProgress(72);
         await loadDocuments();
+        setSessionLoadProgress(94);
       } catch {
         setCurrentUser(defaultUser);
         setIsAuthenticated(false);
         setDocuments([]);
+        setSessionLoadProgress(88);
       } finally {
-        setIsSessionLoading(false);
+        setSessionLoadProgress(100);
+        window.setTimeout(() => {
+          setIsSessionLoading(false);
+        }, 180);
       }
     }
 
@@ -1102,9 +1113,7 @@ export function CareerVaultPlatform() {
   if (isSessionLoading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#0d172b] px-4 text-white">
-        <div className="rounded-[20px] border border-white/10 bg-white/5 px-6 py-5 text-center shadow-2xl shadow-black/20">
-          <p className="text-sm font-semibold text-blue-100">Restoring your session...</p>
-        </div>
+        <SessionLoader progress={sessionLoadProgress} />
       </main>
     );
   }
@@ -1242,6 +1251,62 @@ export function CareerVaultPlatform() {
         onSave={saveEditedDocument}
       />
     </main>
+  );
+}
+
+function SessionLoader({ progress }: { progress: number }) {
+  const [displayProgress, setDisplayProgress] = useState(0);
+  const displayProgressRef = useRef(0);
+
+  useEffect(() => {
+    displayProgressRef.current = displayProgress;
+  }, [displayProgress]);
+
+  useEffect(() => {
+    const target = Math.max(0, Math.min(100, progress));
+    let frame = 0;
+    const from = displayProgressRef.current;
+    const startTime = performance.now();
+    const duration = 320;
+
+    function tick(now: number) {
+      const elapsed = now - startTime;
+      const t = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const nextValue = Math.round(from + (target - from) * eased);
+      displayProgressRef.current = nextValue;
+      setDisplayProgress(nextValue);
+
+      if (t < 1) {
+        frame = requestAnimationFrame(tick);
+      }
+    }
+
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [progress]);
+
+  return (
+    <div
+      aria-label={`Loading ${displayProgress} percent`}
+      aria-live="polite"
+      className="relative flex items-center justify-center"
+      role="status"
+    >
+      <span className="sr-only">Loading {displayProgress}%</span>
+      <div aria-hidden="true" className="absolute h-16 w-16 rounded-full bg-blue-500/20 blur-2xl sm:h-20 sm:w-20" />
+      <div className="relative h-12 w-12 sm:h-14 sm:w-14">
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 animate-spin rounded-full border-[3px] border-white/10 border-t-blue-400 border-r-blue-500 shadow-[0_0_28px_rgba(59,130,246,0.22)] sm:border-4"
+        />
+        <div className="absolute inset-[5px] flex items-center justify-center rounded-full bg-[#0d172b] sm:inset-[6px]">
+          <span className="text-[9px] font-bold tabular-nums tracking-tight text-blue-100 sm:text-[10px]">
+            {displayProgress}%
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 
