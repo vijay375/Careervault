@@ -17,7 +17,6 @@ import {
   Pencil,
   Search,
   Settings,
-  ShieldCheck,
   Trash2,
   UploadCloud,
   User,
@@ -2281,12 +2280,6 @@ function RecentUploadsCard({
             <div className="min-w-0 w-full pr-20 lg:flex-1 lg:pr-0">
               <div className="flex flex-wrap items-center gap-2 lg:pr-0">
                 <h3 className="truncate font-bold text-slate-950">{document.companyName}</h3>
-                {document.status === "Verified" && (
-                  <span className="hidden items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-600 lg:inline-flex">
-                    <ShieldCheck className="h-3 w-3" />
-                    Verified
-                  </span>
-                )}
               </div>
               <p className="mt-1 text-sm text-slate-500">{document.designation}</p>
               <p className="mt-1 truncate text-xs text-slate-500 lg:hidden">{document.fileName}</p>
