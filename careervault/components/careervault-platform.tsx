@@ -3,6 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  ArrowLeft,
   Bell,
   BriefcaseBusiness,
   ChevronDown,
@@ -23,6 +24,7 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  Folder,
 } from "lucide-react";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -31,7 +33,7 @@ import {
   VaultDocument,
 } from "@/lib/careervault-data";
 
-type Screen = "dashboard" | "documents" | "upload" | "viewer";
+type Screen = "dashboard" | "documents" | "upload" | "viewer" | "profile";
 type AuthMode = "login" | "signup" | "forgot" | "verify" | "reset";
 type SortMode = "Newest" | "Name" | "Category";
 
@@ -521,6 +523,9 @@ export function CareerVaultPlatform() {
   const [documentQuery, setDocumentQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("All");
   const [sortMode, setSortMode] = useState<SortMode>("Newest");
+  const [profileReturnScreen, setProfileReturnScreen] = useState<
+    "dashboard" | "documents" | "upload"
+  >("dashboard");
   const [zoom, setZoom] = useState(100);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadForm, setUploadForm] = useState({
@@ -596,6 +601,20 @@ export function CareerVaultPlatform() {
     setScreen("documents");
   }
 
+  function openProfile() {
+    if (screen !== "profile" && screen !== "viewer") {
+      setProfileReturnScreen(
+        screen === "documents" || screen === "upload" ? screen : "dashboard",
+      );
+    }
+
+    setScreen("profile");
+  }
+
+  function closeProfile() {
+    setScreen(profileReturnScreen);
+  }
+
   async function loadDocuments() {
     setIsDocumentsLoading(true);
 
@@ -637,7 +656,7 @@ export function CareerVaultPlatform() {
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated && screen !== "viewer") {
+    if (isAuthenticated && screen !== "viewer" && screen !== "profile") {
       window.localStorage.setItem("careervault-screen", screen);
     }
   }, [isAuthenticated, screen]);
@@ -1126,7 +1145,9 @@ export function CareerVaultPlatform() {
     <main className="min-h-screen bg-[#f6f8fb] text-slate-950">
       <TopNav
         globalSearchResults={globalSearchResults}
+        hideMobileBar={screen === "profile"}
         onGlobalSearchSelect={handleGlobalSearchSelect}
+        onOpenProfile={openProfile}
         onSignOut={signOut}
         query={globalQuery}
         recentDocumentIds={recentDocumentIds}
@@ -1138,7 +1159,7 @@ export function CareerVaultPlatform() {
       <div className="mx-auto flex max-w-[1440px]">
         <Sidebar activeScreen={screen} setScreen={setScreen} user={currentUser} />
 
-        <section className="min-w-0 flex-1 px-4 py-5 sm:px-6 lg:ml-64 lg:px-8">
+        <section className="min-w-0 flex-1 px-4 py-5 pb-24 sm:px-6 lg:ml-64 lg:px-8 lg:pb-5">
           {screen === "dashboard" && (
             <DashboardScreen
               documents={documents}
@@ -1190,6 +1211,10 @@ export function CareerVaultPlatform() {
               setZoom={setZoom}
               zoom={zoom}
             />
+          )}
+
+          {screen === "profile" && (
+            <ProfileScreen onBack={closeProfile} onSignOut={signOut} user={currentUser} />
           )}
         </section>
       </div>
@@ -1484,7 +1509,9 @@ function AuthScreen({
 
 function TopNav({
   globalSearchResults,
+  hideMobileBar,
   onGlobalSearchSelect,
+  onOpenProfile,
   onSignOut,
   query,
   recentDocumentIds,
@@ -1492,7 +1519,9 @@ function TopNav({
   user,
 }: {
   globalSearchResults: ManagedDocument[];
+  hideMobileBar?: boolean;
   onGlobalSearchSelect: (document: ManagedDocument) => void;
+  onOpenProfile: () => void;
   onSignOut: () => void;
   query: string;
   recentDocumentIds: Set<string>;
@@ -1500,17 +1529,19 @@ function TopNav({
   user: UserProfile;
 }) {
   const initials = getInitials(user.name);
-  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const desktopSearchRef = useRef<HTMLDivElement>(null);
+  const mobileSearchRef = useRef<HTMLDivElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const normalizedQuery = query.trim();
   const showSearchResults = isSearchOpen && normalizedQuery.length > 0;
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
-      if (
-        searchContainerRef.current &&
-        !searchContainerRef.current.contains(event.target as Node)
-      ) {
+      const target = event.target as Node;
+      const insideDesktopSearch = desktopSearchRef.current?.contains(target);
+      const insideMobileSearch = mobileSearchRef.current?.contains(target);
+
+      if (!insideDesktopSearch && !insideMobileSearch) {
         setIsSearchOpen(false);
       }
     }
@@ -1519,9 +1550,64 @@ function TopNav({
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, []);
 
+  function renderSearchResults(listboxId: string) {
+    if (!showSearchResults) {
+      return null;
+    }
+
+    return (
+      <div
+        className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-xl shadow-slate-200/70"
+        id={listboxId}
+        role="listbox"
+      >
+        {globalSearchResults.length === 0 ? (
+          <p className="px-4 py-3 text-sm text-slate-500">
+            No documents found in your repository.
+          </p>
+        ) : (
+          <ul className="max-h-80 overflow-y-auto py-2">
+            {globalSearchResults.map((document) => (
+              <li key={document.id}>
+                <button
+                  className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                  onClick={() => {
+                    onGlobalSearchSelect(document);
+                    setIsSearchOpen(false);
+                  }}
+                  role="option"
+                  type="button"
+                >
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[20px] bg-blue-50 text-blue-700">
+                    <FileText className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold text-slate-900">
+                      {document.fileName}
+                    </span>
+                    <span className="mt-0.5 block truncate text-xs text-slate-500">
+                      {document.companyName} · {document.documentType}
+                    </span>
+                    <span className="mt-1 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                      {getDocumentLocation(document, recentDocumentIds)}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur-xl lg:pl-64">
-      <div className="mx-auto flex h-16 max-w-[1180px] items-center gap-4 px-4 sm:px-6 lg:px-8">
+    <header
+      className={`sticky top-0 z-40 bg-white/90 backdrop-blur-xl lg:border-b lg:pl-64 ${
+        hideMobileBar ? "border-b-0 lg:border-b" : "border-b border-slate-200"
+      }`}
+    >
+      <div className="mx-auto hidden h-16 max-w-[1180px] items-center gap-4 px-4 sm:px-6 lg:flex lg:px-8">
         <div className="flex min-w-[220px] items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-md shadow-blue-600/20">
             CV
@@ -1529,10 +1615,7 @@ function TopNav({
           <p className="text-sm font-bold leading-none text-slate-950">CareerVault</p>
         </div>
 
-        <div
-          className="relative mx-auto hidden w-full max-w-xl md:block"
-          ref={searchContainerRef}
-        >
+        <div className="relative mx-auto w-full max-w-xl" ref={desktopSearchRef}>
           <label className="flex h-10 w-full items-center gap-2 rounded-[20px] border border-slate-200 bg-slate-50 px-3 text-slate-500 transition focus-within:border-blue-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100">
             <Search className="h-4 w-4 shrink-0" />
             <input
@@ -1551,57 +1634,14 @@ function TopNav({
               value={query}
             />
           </label>
-
-          {showSearchResults && (
-            <div
-              className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-xl shadow-slate-200/70"
-              id="global-search-results"
-              role="listbox"
-            >
-              {globalSearchResults.length === 0 ? (
-                <p className="px-4 py-3 text-sm text-slate-500">
-                  No documents found in your repository.
-                </p>
-              ) : (
-                <ul className="max-h-80 overflow-y-auto py-2">
-                  {globalSearchResults.map((document) => (
-                    <li key={document.id}>
-                      <button
-                        className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
-                        onClick={() => {
-                          onGlobalSearchSelect(document);
-                          setIsSearchOpen(false);
-                        }}
-                        role="option"
-                        type="button"
-                      >
-                        <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[20px] bg-blue-50 text-blue-700">
-                          <FileText className="h-4 w-4" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-semibold text-slate-900">
-                            {document.fileName}
-                          </span>
-                          <span className="mt-0.5 block truncate text-xs text-slate-500">
-                            {document.companyName} · {document.documentType}
-                          </span>
-                          <span className="mt-1 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
-                            {getDocumentLocation(document, recentDocumentIds)}
-                          </span>
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
+          {renderSearchResults("global-search-results")}
         </div>
 
         <div className="ml-auto flex items-center gap-3">
           <button
             aria-label="Notifications"
             className="flex h-10 w-10 items-center justify-center rounded-[20px] border border-slate-200 bg-white text-slate-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+            type="button"
           >
             <Bell className="h-4 w-4" />
           </button>
@@ -1648,6 +1688,56 @@ function TopNav({
           </DropdownMenu.Root>
         </div>
       </div>
+
+      {!hideMobileBar && (
+        <div className="mx-auto flex h-14 items-center gap-2 px-3 sm:gap-2.5 sm:px-4 lg:hidden">
+          <div
+            aria-label="CareerVault"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white shadow-md shadow-blue-600/20"
+          >
+            CV
+          </div>
+
+          <div className="relative min-w-0 flex-1" ref={mobileSearchRef}>
+            <label className="flex h-10 w-full items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-slate-500 shadow-sm transition focus-within:border-blue-300 focus-within:ring-2 focus-within:ring-blue-100">
+              <Search className="h-4 w-4 shrink-0" />
+              <input
+                aria-autocomplete="list"
+                aria-controls="mobile-global-search-results"
+                aria-expanded={showSearchResults}
+                className="h-full min-w-0 flex-1 bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setIsSearchOpen(true);
+                }}
+                onFocus={() => setIsSearchOpen(true)}
+                placeholder="Search"
+                role="combobox"
+                type="search"
+                value={query}
+              />
+            </label>
+            {renderSearchResults("mobile-global-search-results")}
+          </div>
+
+          <button
+            aria-label="Notifications"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 shadow-sm transition active:bg-slate-50"
+            type="button"
+          >
+            <Bell className="h-4 w-4" />
+          </button>
+
+          <button
+            aria-label="Open profile"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 shadow-sm transition active:bg-slate-50"
+            onClick={onOpenProfile}
+            type="button"
+          >
+            <User className="h-4 w-4" />
+          </button>
+        </div>
+      )}
     </header>
   );
 }
@@ -1742,45 +1832,56 @@ function MobileNav({
   setScreen: (screen: Screen) => void;
 }) {
   return (
-    <nav className="sticky top-16 z-30 flex gap-2 overflow-x-auto border-b border-slate-200 bg-white px-4 py-3 lg:hidden">
-      <MobileNavItem
-        active={activeScreen === "dashboard"}
-        label="Dashboard"
-        onClick={() => setScreen("dashboard")}
-      />
-      <MobileNavItem
-        active={activeScreen === "documents" || activeScreen === "viewer"}
-        label="Documents"
-        onClick={() => setScreen("documents")}
-      />
-      <MobileNavItem
-        active={activeScreen === "upload"}
-        label="Upload"
-        onClick={() => setScreen("upload")}
-      />
+    <nav
+      aria-label="Main navigation"
+      className="fixed bottom-0 left-0 right-0 z-50 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom,0px)] shadow-[0_-4px_24px_rgba(15,23,42,0.06)] lg:hidden"
+    >
+      <div className="mx-auto flex max-w-lg items-stretch justify-around px-2">
+        <MobileNavItem
+          active={activeScreen === "dashboard"}
+          icon={<LayoutDashboard className="h-5 w-5" />}
+          label="Dashboard"
+          onClick={() => setScreen("dashboard")}
+        />
+        <MobileNavItem
+          active={activeScreen === "documents" || activeScreen === "viewer"}
+          icon={<Folder className="h-5 w-5" />}
+          label="Documents"
+          onClick={() => setScreen("documents")}
+        />
+        <MobileNavItem
+          active={activeScreen === "upload"}
+          icon={<UploadCloud className="h-5 w-5" />}
+          label="Upload"
+          onClick={() => setScreen("upload")}
+        />
+      </div>
     </nav>
   );
 }
 
 function MobileNavItem({
   active,
+  icon,
   label,
   onClick,
 }: {
   active: boolean;
+  icon: React.ReactNode;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`shrink-0 rounded-[20px] px-3 py-2 text-sm font-medium transition ${
-        active
-          ? "bg-blue-50 text-blue-700"
-          : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+      aria-current={active ? "page" : undefined}
+      className={`flex min-h-[64px] min-w-[88px] flex-1 flex-col items-center justify-center gap-1 px-2 py-2 transition ${
+        active ? "text-blue-600" : "text-slate-500 active:text-slate-700"
       }`}
       onClick={onClick}
+      type="button"
     >
-      {label}
+      {icon}
+      <span className="text-xs font-medium">{label}</span>
     </button>
   );
 }
@@ -1806,6 +1907,93 @@ function SidebarItem({
       onClick={onClick}
     >
       {icon}
+      {label}
+    </button>
+  );
+}
+
+function ProfileScreen({
+  onBack,
+  onSignOut,
+  user,
+}: {
+  onBack: () => void;
+  onSignOut: () => void;
+  user: UserProfile;
+}) {
+  const initials = getInitials(user.name);
+
+  return (
+    <>
+      <header className="sticky top-0 z-30 -mx-4 mb-4 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:hidden">
+        <button
+          className="flex min-h-10 items-center gap-2 rounded-[20px] px-1 text-sm font-semibold text-slate-700 transition active:bg-slate-50"
+          onClick={onBack}
+          type="button"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back
+        </button>
+      </header>
+
+      <div className="space-y-8 pb-4">
+        <section className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center gap-4">
+          <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-linear-to-br from-blue-600 to-violet-600 text-lg font-semibold text-white">
+            {initials}
+          </span>
+          <div className="min-w-0">
+            <h1 className="truncate text-xl font-bold text-slate-950">{user.name}</h1>
+            <p className="mt-1 truncate text-sm text-slate-500">{user.email}</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <p className="px-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+          Account
+        </p>
+        <div className="mt-3 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-sm">
+          <ProfileMenuItem icon={<User className="h-4 w-4" />} label="My Profile" />
+          <ProfileMenuItem
+            icon={<Settings className="h-4 w-4" />}
+            label="Account Settings"
+          />
+          <ProfileMenuItem
+            icon={<HelpCircle className="h-4 w-4" />}
+            label="Help & Support"
+          />
+        </div>
+      </section>
+
+      <section className="pt-2">
+        <button
+          className="flex w-full items-center gap-3 rounded-[20px] border border-red-100 bg-white px-4 py-4 text-left text-sm font-semibold text-red-600 shadow-sm transition active:bg-red-50"
+          onClick={onSignOut}
+          type="button"
+        >
+          <X className="h-4 w-4" />
+          Sign Out
+        </button>
+      </section>
+      </div>
+    </>
+  );
+}
+
+function ProfileMenuItem({
+  icon,
+  label,
+}: {
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      className="flex w-full items-center gap-3 border-b border-slate-100 px-4 py-4 text-left text-sm font-medium text-slate-700 transition last:border-b-0 active:bg-slate-50"
+      type="button"
+    >
+      <span className="text-slate-500">{icon}</span>
       {label}
     </button>
   );
@@ -1944,17 +2132,18 @@ function RecentUploadsCard({
 }) {
   return (
     <section className="rounded-[20px] border border-slate-200/80 bg-white p-6 shadow-xl shadow-slate-200/60">
-      <div className="flex items-start justify-between gap-4">
-        <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <h2 className="text-xl font-bold tracking-tight text-slate-950">
             Recent uploads
           </h2>
-          <p className="mt-1 text-sm text-slate-500">
+          <p className="mt-1 text-sm text-slate-500 lg:hidden">Fast Onboarding Access.</p>
+          <p className="mt-1 hidden text-sm text-slate-500 lg:block">
             Fast access for onboarding & HR checks.
           </p>
         </div>
         <button
-          className="rounded-[20px] px-3 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-50"
+          className="shrink-0 whitespace-nowrap rounded-[20px] px-3 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-50"
           onClick={onViewAll}
         >
           View all
@@ -1964,56 +2153,57 @@ function RecentUploadsCard({
       <div className="mt-6 max-h-[388px] space-y-3 overflow-y-auto pr-1">
         {documents.map((document) => (
           <article
-            className="group relative grid gap-4 rounded-[20px] border border-slate-200 bg-slate-50/70 p-4 pr-32 transition hover:border-blue-200 hover:bg-white hover:shadow-lg hover:shadow-slate-200/70 sm:grid-cols-[auto_1fr]"
+            className="group relative flex flex-col items-start gap-3 rounded-[20px] border border-slate-200 bg-slate-50/70 p-4 transition hover:border-blue-200 hover:bg-white hover:shadow-lg hover:shadow-slate-200/70 lg:grid lg:grid-cols-[auto_1fr] lg:items-start lg:gap-4 lg:pr-32"
             key={document.id}
           >
             <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[20px] bg-blue-50 text-blue-700">
               <FileText className="h-6 w-6" />
             </div>
 
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-0 w-full pr-20 lg:flex-1 lg:pr-0">
+              <div className="flex flex-wrap items-center gap-2 lg:pr-0">
                 <h3 className="truncate font-bold text-slate-950">{document.companyName}</h3>
                 {document.status === "Verified" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-600">
+                  <span className="hidden items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-600 lg:inline-flex">
                     <ShieldCheck className="h-3 w-3" />
                     Verified
                   </span>
                 )}
               </div>
               <p className="mt-1 text-sm text-slate-500">{document.designation}</p>
-              <p className="mt-1 truncate text-xs text-slate-500">
+              <p className="mt-1 truncate text-xs text-slate-500 lg:hidden">{document.fileName}</p>
+              <p className="mt-1 hidden truncate text-xs text-slate-500 lg:block">
                 {document.fileName} · {document.fileSize}
               </p>
+
+              <div className="mt-3 flex items-center gap-2 lg:absolute lg:bottom-4 lg:right-4 lg:mt-0">
+                <button
+                  aria-label={`View ${document.fileName}`}
+                  className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:text-blue-700"
+                  onClick={() => onOpen(document)}
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
+                <button
+                  aria-label={`Edit ${document.fileName}`}
+                  className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:text-blue-700"
+                  onClick={() => onEdit(document)}
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+                <button
+                  aria-label={`Download ${document.fileName}`}
+                  className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:text-blue-700"
+                  onClick={() => onDownload(document)}
+                >
+                  <Download className="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
             <span className="absolute right-4 top-4 rounded-[20px] bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700">
               {document.documentType}
             </span>
-
-            <div className="absolute bottom-4 right-4 flex items-center gap-2">
-              <button
-                aria-label={`View ${document.fileName}`}
-                className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:text-blue-700"
-                onClick={() => onOpen(document)}
-              >
-                <Eye className="h-4 w-4" />
-              </button>
-              <button
-                aria-label={`Edit ${document.fileName}`}
-                className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:text-blue-700"
-                onClick={() => onEdit(document)}
-              >
-                <Pencil className="h-4 w-4" />
-              </button>
-              <button
-                aria-label={`Download ${document.fileName}`}
-                className="flex h-9 w-9 items-center justify-center rounded-[20px] bg-white text-slate-500 shadow-sm ring-1 ring-slate-200 transition hover:text-blue-700"
-                onClick={() => onDownload(document)}
-              >
-                <Download className="h-4 w-4" />
-              </button>
-            </div>
           </article>
         ))}
       </div>
