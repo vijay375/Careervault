@@ -19,8 +19,8 @@ Do **not** merge the apps. Deploy them as two Vercel projects (multi-zone) and k
 2. **HR Portal project** (create if missing)
    - Root Directory: `careervault-hr`
    - Build-time `NEXT_PUBLIC_BASE_PATH=/hr`
-   - Own Vercel URL (example: `https://careervault-hr.vercel.app`)
-   - Reachable on the main domain through User Portal rewrites
+   - Production alias: `https://careervault-hr.vercel.app`
+   - Reachable on the main domain through User Portal rewrites at `/hr`
 
 ## Required Vercel environment variables
 
@@ -39,7 +39,7 @@ EMAIL_DEV_OTP_FALLBACK=false
 NEXT_PUBLIC_APP_URL=https://careervault-rust.vercel.app
 NEXT_PUBLIC_USER_PORTAL_URL=https://careervault-rust.vercel.app
 NEXT_PUBLIC_HR_PORTAL_URL=https://careervault-rust.vercel.app/hr
-HR_ZONE_URL=https://<your-hr-project>.vercel.app
+HR_ZONE_URL=https://careervault-hr.vercel.app
 ```
 
 `HR_ZONE_URL` is the **HR project's own** Vercel origin (no path, no trailing slash).  
