@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { handleApiOperation } from "@/lib/api-errors";
 import { getDocumentFile } from "@/lib/server-auth";
 import { requireUser, unauthorized } from "@/lib/server-session";
 
@@ -9,24 +10,26 @@ type RouteContext = {
 };
 
 export async function GET(request: NextRequest, context: RouteContext) {
-  const user = await requireUser(request);
+  return handleApiOperation("document file lookup", async () => {
+    const user = await requireUser(request);
 
-  if (!user) {
-    return unauthorized();
-  }
+    if (!user) {
+      return unauthorized();
+    }
 
-  const { id } = await context.params;
-  const file = await getDocumentFile(user.id, id);
+    const { id } = await context.params;
+    const file = await getDocumentFile(user.id, id);
 
-  if (!file) {
-    return NextResponse.json({ ok: false, message: "File not found." }, { status: 404 });
-  }
+    if (!file) {
+      return NextResponse.json({ ok: false, message: "File not found." }, { status: 404 });
+    }
 
-  return new NextResponse(file.data, {
-    headers: {
-      "Content-Type": file.mimeType,
-      "Content-Disposition": `inline; filename="${file.fileName.replace(/"/g, "")}"`,
-      "Cache-Control": "private, max-age=60",
-    },
+    return new NextResponse(file.data, {
+      headers: {
+        "Content-Type": file.mimeType,
+        "Content-Disposition": `inline; filename="${file.fileName.replace(/"/g, "")}"`,
+        "Cache-Control": "private, max-age=60",
+      },
+    });
   });
 }

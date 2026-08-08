@@ -1,4 +1,6 @@
 node_modules/
+.next/
+.vercel/
 career-vault/
 .env*
 !.env.example
@@ -7,3 +9,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.tsbuildinfo
+.tmp-*.js
+

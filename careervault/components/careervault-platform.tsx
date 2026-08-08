@@ -33,8 +33,14 @@ import {
 } from "@/lib/careervault-data";
 
 type Screen = "dashboard" | "documents" | "upload" | "viewer" | "profile";
-type AuthMode = "login" | "signup" | "forgot" | "verify" | "reset";
+type AuthMode =
+  | "login"
+  | "signup"
+  | "forgot"
+  | "verify"
+  | "reset";
 type SortMode = "Newest" | "Name" | "Category";
+type AccountRole = "employee" | "recruiter";
 
 type ManagedDocument = VaultDocument & {
   description?: string;
@@ -52,6 +58,9 @@ type UserProfile = {
   id: string;
   name: string;
   email: string;
+  role: AccountRole;
+  firstName?: string;
+  lastName?: string;
 };
 
 type AuthApiResponse = {
@@ -59,26 +68,41 @@ type AuthApiResponse = {
   message: string;
   user?: UserProfile;
   resendAvailableAt?: number;
+  expiresAt?: number;
+  developmentCode?: string;
 };
 
 const defaultUser = {
   id: "",
   name: "",
   email: "",
+  role: "employee" as AccountRole,
+  firstName: "",
+  lastName: "",
 };
 
 const allowedExtensions = ["pdf", "doc", "docx", "jpg", "jpeg", "png"];
 const resendCooldownMs = 60 * 1000;
 const globalSearchResultLimit = 8;
 const loadingRevealDelayMs = 200;
+const hrPortalUrl = process.env.NEXT_PUBLIC_HR_PORTAL_URL || "http://localhost:3001";
+
+function getSafeReturnPath() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const returnTo = new URLSearchParams(window.location.search).get("returnTo");
+  return returnTo?.startsWith("/request/") ? returnTo : null;
+}
 
 function useDelayedLoading(isLoading: boolean) {
   const [showLoading, setShowLoading] = useState(false);
 
   useEffect(() => {
     if (!isLoading) {
-      setShowLoading(false);
-      return;
+      const resetId = window.setTimeout(() => setShowLoading(false), 0);
+      return () => window.clearTimeout(resetId);
     }
 
     const timeoutId = window.setTimeout(() => {
@@ -133,6 +157,29 @@ function getPasswordPolicyMessage(password: string) {
   return "";
 }
 
+function maskEmailAddress(email: string) {
+  const [localPart, domain] = email.split("@");
+  if (!localPart || !domain) {
+    return email;
+  }
+
+  if (localPart.length <= 2) {
+    return `${localPart[0] || "*"}***@${domain}`;
+  }
+
+  return `${localPart.slice(0, 2)}***@${domain}`;
+}
+
+function formatCountdown(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function withDevelopmentCode(message: string, developmentCode?: string) {
+  return developmentCode ? `${message} Dev code: ${developmentCode}` : message;
+}
+
 async function postAuthRequest(path: string, payload: Record<string, string>) {
   const response = await fetch(path, {
     method: "POST",
@@ -151,6 +198,8 @@ async function postAuthRequest(path: string, payload: Record<string, string>) {
     message: data.message || "Something went wrong. Please try again.",
     user: data.user,
     resendAvailableAt: data.resendAvailableAt,
+    expiresAt: data.expiresAt,
+    developmentCode: data.developmentCode,
   };
 }
 
@@ -167,13 +216,22 @@ async function parseApiResponse<T>(response: Response) {
   return data;
 }
 
-function getInitials(name: string) {
-  return name
-    .split(" ")
+function getInitials(name: string, lastName?: string) {
+  const parts = [name, lastName]
+    .filter(Boolean)
+    .join(" ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return parts
     .map((part) => part[0])
     .join("")
     .slice(0, 2)
     .toUpperCase();
+}
+
+function getProfileName(user: Pick<UserProfile, "name" | "firstName">) {
+  return String(user.firstName || user.name || "").trim();
 }
 
 function getFirstName(name: string) {
@@ -480,25 +538,6 @@ async function parseUploadedFile(file: File) {
   }
 }
 
-function toManagedDocument(document: VaultDocument): ManagedDocument {
-  const extension = document.fileName.split(".").pop()?.toUpperCase() ?? "PDF";
-
-  return {
-    ...document,
-    description: `${document.documentType} for ${document.designation} at ${document.companyName}.`,
-    fileType: extension === "JPEG" ? "JPG" : (extension as ManagedDocument["fileType"]),
-    lastViewed: document.id === "doc-001" ? "2026-06-24" : undefined,
-    extractedText: [
-      `Company Name: ${document.companyName}`,
-      `Designation: ${document.designation}`,
-      `Employment Period: ${formatDate(document.joiningDate)} - ${formatDate(document.relievingDate)}`,
-      `Document Type: ${document.documentType}`,
-    ].join("\n"),
-    extractedAt: document.uploadedAt,
-    employmentPeriod: `${formatDate(document.joiningDate)} - ${formatDate(document.relievingDate)}`,
-  };
-}
-
 type ParsedDocumentMetadata = {
   companyName: string;
   designation: string;
@@ -521,8 +560,11 @@ export function CareerVaultPlatform() {
   const [authFormKey, setAuthFormKey] = useState(0);
   const [loginPrefillEmail, setLoginPrefillEmail] = useState("");
   const [resetEmail, setResetEmail] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
   const [resendAvailableAt, setResendAvailableAt] = useState(0);
   const [resendSeconds, setResendSeconds] = useState(0);
+  const [otpExpiresAt, setOtpExpiresAt] = useState(0);
+  const [otpSeconds, setOtpSeconds] = useState(0);
   const [screen, setScreen] = useState<Screen>(() => {
     if (typeof window === "undefined") {
       return "dashboard";
@@ -665,6 +707,15 @@ export function CareerVaultPlatform() {
         const data = await parseApiResponse<{
           user: UserProfile;
         }>(response);
+        if (data.user.role === "recruiter") {
+          window.location.replace(hrPortalUrl);
+          return;
+        }
+        const returnPath = getSafeReturnPath();
+        if (returnPath) {
+          window.location.replace(returnPath);
+          return;
+        }
         setCurrentUser(data.user);
         setIsAuthenticated(true);
         setSessionLoadProgress(72);
@@ -685,6 +736,26 @@ export function CareerVaultPlatform() {
 
     restoreSession();
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || isAuthenticated || isSessionLoading) {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const auth = params.get("auth");
+
+    if (auth === "login") {
+      setAuthMode("login");
+      window.history.replaceState({}, "", "/");
+      return;
+    }
+
+    if (auth === "signup") {
+      setAuthMode("signup");
+      window.history.replaceState({}, "", "/");
+    }
+  }, [isAuthenticated, isSessionLoading]);
 
   useEffect(() => {
     if (isAuthenticated && screen !== "viewer" && screen !== "profile") {
@@ -719,14 +790,32 @@ export function CareerVaultPlatform() {
     return () => window.clearInterval(intervalId);
   }, [resendAvailableAt]);
 
+  useEffect(() => {
+    if (!otpExpiresAt) {
+      setOtpSeconds(0);
+      return;
+    }
+
+    const updateCountdown = () => {
+      setOtpSeconds(Math.max(0, Math.ceil((otpExpiresAt - Date.now()) / 1000)));
+    };
+
+    updateCountdown();
+    const intervalId = window.setInterval(updateCountdown, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [otpExpiresAt]);
+
   async function handleResendCode() {
-    if (!resetEmail || authLoading || resendSeconds > 0) {
+    const email = resetEmail;
+
+    if (!email || authLoading || resendSeconds > 0) {
       return;
     }
 
     setAuthLoading(true);
     setAuthMessage("");
-    const result = await postAuthRequest("/api/auth/resend-code", { email: resetEmail });
+    const result = await postAuthRequest("/api/auth/resend-code", { email });
     setAuthLoading(false);
 
     if (result.resendAvailableAt) {
@@ -735,7 +824,11 @@ export function CareerVaultPlatform() {
       setResendAvailableAt(Date.now() + resendCooldownMs);
     }
 
-    setAuthMessage(result.message);
+    if (result.expiresAt) {
+      setOtpExpiresAt(result.expiresAt);
+    }
+
+    setAuthMessage(withDevelopmentCode(result.message, result.developmentCode));
   }
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
@@ -745,27 +838,63 @@ export function CareerVaultPlatform() {
     }
 
     const formData = new FormData(event.currentTarget);
-    const name = String(formData.get("name") || "").trim();
     const email = String(formData.get("email") || "").trim();
     const password = String(formData.get("password") || "").trim();
+    const role = String(formData.get("role") || "") as AccountRole;
+    const firstName = String(formData.get("firstName") || "").trim();
+    const lastName = String(formData.get("lastName") || "").trim();
     const code = String(formData.get("code") || "").trim();
     const confirmPassword = String(formData.get("confirmPassword") || "").trim();
 
     if (authMode === "signup") {
+      if (role !== "employee" && role !== "recruiter") {
+        setAuthMessage("Please choose your account type.");
+        return;
+      }
+
+      if (!firstName) {
+        setAuthMessage("Please enter your first name.");
+        return;
+      }
+
+      if (!lastName) {
+        setAuthMessage("Please enter your last name.");
+        return;
+      }
+
+      if (!email) {
+        setAuthMessage("Please enter your email address.");
+        return;
+      }
+
       const passwordMessage = getPasswordPolicyMessage(password);
       if (passwordMessage) {
         setAuthMessage(passwordMessage);
         return;
       }
 
+      if (password !== confirmPassword) {
+        setAuthMessage("Passwords do not match. Please try again.");
+        return;
+      }
+
       setAuthLoading(true);
       setAuthMessage("");
-      const result = await postAuthRequest("/api/auth/signup", { name, email, password });
+      const result = await postAuthRequest("/api/auth/signup", {
+        email,
+        password,
+        role,
+        firstName,
+        lastName,
+      });
       setAuthLoading(false);
       setAuthMessage(result.message);
 
       if (result.ok) {
         setLoginPrefillEmail(email);
+        setSignupEmail("");
+        setResendAvailableAt(0);
+        setOtpExpiresAt(0);
         setAuthFormKey((key) => key + 1);
         setAuthMode("login");
       }
@@ -785,7 +914,7 @@ export function CareerVaultPlatform() {
         setAuthMode("verify");
       }
 
-      setAuthMessage(result.message);
+      setAuthMessage(withDevelopmentCode(result.message, result.developmentCode));
       return;
     }
 
@@ -861,11 +990,21 @@ export function CareerVaultPlatform() {
       return;
     }
 
+    if (result.user.role === "recruiter") {
+      window.location.replace(hrPortalUrl);
+      return;
+    }
+    const returnPath = getSafeReturnPath();
+    if (returnPath) {
+      window.location.replace(returnPath);
+      return;
+    }
+
     setCurrentUser(result.user);
     setIsAuthenticated(true);
     await loadDocuments();
     setAuthMessage("");
-    setToast(`Welcome back, ${result.user.name}.`);
+    setToast(`Welcome back, ${getProfileName(result.user)}.`);
   }
 
   async function signOut() {
@@ -1147,6 +1286,7 @@ export function CareerVaultPlatform() {
           isLoading={authLoading}
           loginPrefillEmail={loginPrefillEmail}
           message={authMessage}
+          otpSeconds={otpSeconds}
           onAuthModeChange={(mode) => {
             setAuthMode(mode);
             setAuthMessage("");
@@ -1155,8 +1295,11 @@ export function CareerVaultPlatform() {
               setResetEmail("");
               setResendAvailableAt(0);
               setResendSeconds(0);
+              setOtpExpiresAt(0);
+              setOtpSeconds(0);
             }
             if (mode === "login" || mode === "signup") {
+              setSignupEmail("");
               setLoginPrefillEmail("");
               setAuthFormKey((key) => key + 1);
             }
@@ -1164,6 +1307,7 @@ export function CareerVaultPlatform() {
           onResendCode={handleResendCode}
           onSubmit={handleAuthSubmit}
           resendSeconds={resendSeconds}
+          signupEmail={signupEmail}
         />
         <Toast message={toast} />
       </>
@@ -1346,6 +1490,20 @@ function SessionLoader({ progress }: { progress: number }) {
   );
 }
 
+const signupStepCount = 4;
+
+const emptySignupDraft = {
+  firstName: "",
+  lastName: "",
+  email: "",
+  role: "" as AccountRole | "",
+  password: "",
+  confirmPassword: "",
+};
+
+type SignupDraft = typeof emptySignupDraft;
+type SignupFieldErrors = Partial<Record<keyof SignupDraft, string>>;
+
 function AuthScreen({
   authFormKey,
   authMode,
@@ -1355,7 +1513,9 @@ function AuthScreen({
   onAuthModeChange,
   onResendCode,
   onSubmit,
+  otpSeconds,
   resendSeconds,
+  signupEmail,
 }: {
   authFormKey: number;
   authMode: AuthMode;
@@ -1365,29 +1525,32 @@ function AuthScreen({
   onAuthModeChange: (mode: AuthMode) => void;
   onResendCode: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  otpSeconds: number;
   resendSeconds: number;
+  signupEmail: string;
 }) {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   useEffect(() => {
-    setShowPassword(false);
-    setShowConfirmPassword(false);
+    const timeoutId = window.setTimeout(() => {
+      setShowPassword(false);
+      setShowConfirmPassword(false);
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, [authMode, authFormKey]);
   const isSignup = authMode === "signup";
   const isLogin = authMode === "login";
   const isForgot = authMode === "forgot";
   const isVerify = authMode === "verify";
   const isReset = authMode === "reset";
-  const title = isSignup
-    ? "Create account"
-    : isForgot
-      ? "Forgot password"
-      : isVerify
-        ? "Verify code"
-        : isReset
-          ? "Reset password"
-          : "Welcome back";
+  const title = isForgot
+    ? "Forgot password"
+    : isVerify
+      ? "Verify code"
+      : isReset
+        ? "Reset password"
+        : "Welcome back";
   const subtitle = isForgot
     ? "Enter your registered email address to receive a verification code."
     : isVerify
@@ -1395,27 +1558,44 @@ function AuthScreen({
       : isReset
         ? "Create a new password that meets the security requirements."
         : "Sign in to access your protected vault.";
-  const submitLabel = isSignup
-    ? "Create account"
-    : isForgot
-      ? "Send verification code"
-      : isVerify
-        ? "Verify code"
-        : isReset
-          ? "Reset password"
-          : "Sign in";
+  const submitLabel = isForgot
+    ? "Send verification code"
+    : isVerify
+      ? "Verify code"
+      : isReset
+        ? "Reset password"
+        : "Sign in";
   const isErrorMessage =
     message.startsWith("No account") ||
     message.startsWith("Password") ||
     message.startsWith("Passwords") ||
+    message.startsWith("An account") ||
     message.startsWith("The verification") ||
     message.startsWith("This verification") ||
+    message.startsWith("Too many") ||
+    message.startsWith("Your email") ||
+    message.startsWith("Email service") ||
+    message.startsWith("We could not") ||
     message.startsWith("Please");
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#0d172b] px-4 py-8 text-white">
-      <section className="grid w-full max-w-5xl overflow-hidden rounded-[20px] border border-white/10 bg-white/5 shadow-2xl shadow-black/30 backdrop-blur lg:grid-cols-[1fr_420px]">
-        <div className="bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.45),transparent_32%),linear-gradient(135deg,#0d172b,#0f2f83)] p-8 sm:p-10">
+    <main
+      className={`flex min-h-screen items-center justify-center bg-[#0d172b] px-4 py-6 text-white sm:py-8 ${
+        isSignup ? "overflow-hidden" : ""
+      }`}
+    >
+      <section
+        className={`grid w-full max-w-5xl overflow-hidden rounded-[20px] border border-white/10 bg-white/5 shadow-2xl shadow-black/30 backdrop-blur lg:grid-cols-[1fr_420px] ${
+          isSignup
+            ? "max-h-[calc(100dvh-3rem)] lg:h-[min(600px,calc(100dvh-4rem))]"
+            : ""
+        }`}
+      >
+        <div
+          className={`${
+            isSignup ? "hidden lg:block" : ""
+          } bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.45),transparent_32%),linear-gradient(135deg,#0d172b,#0f2f83)] p-8 sm:p-10`}
+        >
           <div className="flex items-center gap-4">
             <div className="flex h-14 w-14 items-center justify-center rounded-[20px] bg-blue-500 text-xl font-bold">
               CV
@@ -1434,64 +1614,468 @@ function AuthScreen({
           </p>
         </div>
 
-        <form className="bg-white p-6 text-slate-950 sm:p-8" onSubmit={onSubmit}>
-          <h2 className="text-2xl font-bold">{title}</h2>
-          {!isSignup && <p className="mt-2 text-sm text-slate-500">{subtitle}</p>}
-          {message && (
-            <p
-              className={`mt-4 rounded-[20px] border px-4 py-3 text-sm font-semibold ${
-                isErrorMessage
-                  ? "border-red-100 bg-red-50 text-red-700"
-                  : "border-blue-100 bg-blue-50 text-blue-800"
-              }`}
-            >
-              {message}
-            </p>
-          )}
-
-          <div className="mt-6 space-y-4" key={`${authMode}-${authFormKey}`}>
-            {isSignup && (
-              <label className="block">
-                <span className="text-sm font-semibold text-slate-700">Full name</span>
-                <input
-                  autoComplete="name"
-                  className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
-                  name="name"
-                  placeholder="Enter your full name"
-                  required
-                />
-              </label>
+        {isSignup ? (
+          <SignupWizard
+            authFormKey={authFormKey}
+            isLoading={isLoading}
+            message={message}
+            onAuthModeChange={onAuthModeChange}
+            onSubmit={onSubmit}
+          />
+        ) : (
+          <form className="bg-white p-6 text-slate-950 sm:p-8" onSubmit={onSubmit}>
+            <h2 className="text-2xl font-bold">{title}</h2>
+            <p className="mt-2 text-sm text-slate-500">{subtitle}</p>
+            {message && (
+              <p
+                className={`mt-4 rounded-[20px] border px-4 py-3 text-sm font-semibold ${
+                  isErrorMessage
+                    ? "border-red-100 bg-red-50 text-red-700"
+                    : "border-blue-100 bg-blue-50 text-blue-800"
+                }`}
+              >
+                {message}
+              </p>
             )}
 
-            {(isSignup || isLogin || isForgot) && (
+            <div className="mt-6 space-y-4" key={`${authMode}-${authFormKey}`}>
+              {(isLogin || isForgot) && (
+                <label className="block">
+                  <span className="text-sm font-semibold text-slate-700">Email</span>
+                  <input
+                    autoComplete="email"
+                    className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
+                    defaultValue={isLogin ? loginPrefillEmail : undefined}
+                    name="email"
+                    placeholder="Enter your email"
+                    required
+                    type="email"
+                  />
+                </label>
+              )}
+
+              {(isLogin || isReset) && (
+                <label className="block">
+                  <span className="text-sm font-semibold text-slate-700">Password</span>
+                  <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
+                    <input
+                      autoComplete={isReset ? "new-password" : "current-password"}
+                      className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
+                      minLength={8}
+                      name="password"
+                      placeholder={
+                        isReset ? "Enter your new password" : "Enter your password"
+                      }
+                      required
+                      type={showPassword ? "text" : "password"}
+                    />
+                    <button
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                      className="ml-2 text-slate-400 transition hover:text-blue-700"
+                      onClick={() => setShowPassword((current) => !current)}
+                      type="button"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
+                  {isLogin && (
+                    <span className="mt-2 flex justify-end">
+                      <button
+                        className="text-sm font-semibold text-blue-700 transition hover:text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                        onClick={() => onAuthModeChange("forgot")}
+                        type="button"
+                      >
+                        Forgot Password?
+                      </button>
+                    </span>
+                  )}
+                </label>
+              )}
+
+              {isVerify && (
+                <label className="block">
+                  <span className="text-sm font-semibold text-slate-700">
+                    Verification code
+                  </span>
+                  <input
+                    className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-center text-lg font-bold tracking-[0.35em] outline-none focus:border-blue-400"
+                    inputMode="numeric"
+                    maxLength={6}
+                    minLength={6}
+                    name="code"
+                    placeholder="000000"
+                    required
+                  />
+                </label>
+              )}
+
+              {isReset && (
+                <>
+                  <label className="block">
+                    <span className="text-sm font-semibold text-slate-700">
+                      Confirm new password
+                    </span>
+                    <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
+                      <input
+                        autoComplete="new-password"
+                        className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
+                        minLength={8}
+                        name="confirmPassword"
+                        placeholder="Confirm your new password"
+                        required
+                        type={showConfirmPassword ? "text" : "password"}
+                      />
+                      <button
+                        aria-label={
+                          showConfirmPassword ? "Hide password" : "Show password"
+                        }
+                        className="ml-2 text-slate-400 transition hover:text-blue-700"
+                        onClick={() => setShowConfirmPassword((current) => !current)}
+                        type="button"
+                      >
+                        {showConfirmPassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </label>
+                  <p className="rounded-[20px] bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
+                    Use at least 8 characters with uppercase, lowercase, and a number.
+                  </p>
+                </>
+              )}
+            </div>
+
+            <button
+              className="mt-6 h-11 w-full rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              disabled={isLoading}
+            >
+              {isLoading ? "Please wait..." : submitLabel}
+            </button>
+
+            {isVerify && (
+              <button
+                className="mt-4 w-full text-sm font-semibold text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                disabled={isLoading || resendSeconds > 0}
+                onClick={onResendCode}
+                type="button"
+              >
+                {resendSeconds > 0 ? `Resend Code in ${resendSeconds}s` : "Resend Code"}
+              </button>
+            )}
+
+            {isLogin && (
+              <button
+                className="mt-4 w-full text-sm font-semibold text-blue-700"
+                onClick={() => onAuthModeChange("signup")}
+                type="button"
+              >
+                I don&apos;t have an account
+              </button>
+            )}
+
+            {(isForgot || isVerify || isReset) && (
+              <button
+                className="mt-3 w-full text-sm font-semibold text-slate-500 transition hover:text-slate-800"
+                onClick={() => onAuthModeChange("login")}
+                type="button"
+              >
+                Back to Login
+              </button>
+            )}
+          </form>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function SignupWizard({
+  authFormKey,
+  isLoading,
+  message,
+  onAuthModeChange,
+  onSubmit,
+}: {
+  authFormKey: number;
+  isLoading: boolean;
+  message: string;
+  onAuthModeChange: (mode: AuthMode) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const [step, setStep] = useState(1);
+  const [draft, setDraft] = useState<SignupDraft>(emptySignupDraft);
+  const [fieldErrors, setFieldErrors] = useState<SignupFieldErrors>({});
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  useEffect(() => {
+    setStep(1);
+    setDraft(emptySignupDraft);
+    setFieldErrors({});
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+  }, [authFormKey]);
+
+  const isErrorMessage =
+    message.startsWith("No account") ||
+    message.startsWith("Password") ||
+    message.startsWith("Passwords") ||
+    message.startsWith("An account") ||
+    message.startsWith("We could not") ||
+    message.startsWith("Please");
+
+  const stepCopy =
+    step === 1
+      ? {
+          title: "Basic information",
+          subtitle: "Tell us your name to personalize your vault.",
+        }
+      : step === 2
+        ? {
+            title: "Account details",
+            subtitle: "Choose your role and add the email you’ll use to sign in.",
+          }
+        : step === 3
+          ? {
+              title: "Security",
+              subtitle: "Create a strong password to protect your account.",
+            }
+          : {
+              title: "Confirmation",
+              subtitle: "Review your details, then create your account.",
+            };
+
+  function updateDraft<K extends keyof SignupDraft>(key: K, value: SignupDraft[K]) {
+    setDraft((current) => ({ ...current, [key]: value }));
+    setFieldErrors((current) => {
+      if (!current[key]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function getStepErrors(currentStep: number) {
+    const errors: SignupFieldErrors = {};
+
+    if (currentStep === 1) {
+      if (!draft.firstName.trim()) {
+        errors.firstName = "Please enter your first name.";
+      }
+      if (!draft.lastName.trim()) {
+        errors.lastName = "Please enter your last name.";
+      }
+    }
+
+    if (currentStep === 2) {
+      if (draft.role !== "employee" && draft.role !== "recruiter") {
+        errors.role = "Please choose your account type.";
+      }
+      if (!draft.email.trim()) {
+        errors.email = "Please enter your email address.";
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(draft.email.trim())) {
+        errors.email = "Please enter a valid email address.";
+      }
+    }
+
+    if (currentStep === 3) {
+      const passwordMessage = getPasswordPolicyMessage(draft.password);
+      if (passwordMessage) {
+        errors.password = passwordMessage;
+      }
+      if (!draft.confirmPassword) {
+        errors.confirmPassword = "Please confirm your password.";
+      } else if (draft.password !== draft.confirmPassword) {
+        errors.confirmPassword = "Passwords do not match. Please try again.";
+      }
+    }
+
+    return errors;
+  }
+
+  function validateStep(currentStep: number) {
+    const errors = getStepErrors(currentStep);
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  }
+
+  function goNext() {
+    if (!validateStep(step)) {
+      return;
+    }
+    setStep((current) => Math.min(current + 1, signupStepCount));
+  }
+
+  function goBack() {
+    setFieldErrors({});
+    setStep((current) => Math.max(current - 1, 1));
+  }
+
+  function handleFormSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (step < signupStepCount) {
+      goNext();
+      return;
+    }
+
+    for (const checkStep of [1, 2, 3] as const) {
+      const errors = getStepErrors(checkStep);
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        setStep(checkStep);
+        return;
+      }
+    }
+
+    onSubmit(event);
+  }
+
+  const inputClass = (hasError?: string) =>
+    `mt-2 h-11 w-full rounded-[20px] border px-3 text-sm outline-none focus:border-blue-400 ${
+      hasError ? "border-red-300" : "border-slate-200"
+    }`;
+
+  return (
+    <form
+      className="flex h-full min-h-0 flex-col bg-white p-6 text-slate-950 sm:p-8"
+      onSubmit={handleFormSubmit}
+    >
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">
+        Step {step} of {signupStepCount}
+      </p>
+      <h2 className="mt-2 text-2xl font-bold">Create account</h2>
+      <p className="mt-1 text-sm text-slate-500">{stepCopy.subtitle}</p>
+
+      {message && step === signupStepCount && (
+        <p
+          className={`mt-3 shrink-0 rounded-[20px] border px-4 py-3 text-sm font-semibold ${
+            isErrorMessage
+              ? "border-red-100 bg-red-50 text-red-700"
+              : "border-blue-100 bg-blue-50 text-blue-800"
+          }`}
+        >
+          {message}
+        </p>
+      )}
+
+      <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
+        <div className="careervault-fade-in space-y-4" key={step}>
+          {step === 1 && (
+            <>
+              <p className="text-sm font-semibold text-slate-700">{stepCopy.title}</p>
+              <div className="space-y-4">
+                <label className="block">
+                  <span className="text-sm font-semibold text-slate-700">First Name</span>
+                  <input
+                    autoComplete="given-name"
+                    className={inputClass(fieldErrors.firstName)}
+                    name="firstName"
+                    onChange={(event) => updateDraft("firstName", event.target.value)}
+                    placeholder="Enter your first name"
+                    value={draft.firstName}
+                  />
+                  {fieldErrors.firstName ? (
+                    <span className="mt-1.5 block text-xs font-medium text-red-600">
+                      {fieldErrors.firstName}
+                    </span>
+                  ) : null}
+                </label>
+                <label className="block">
+                  <span className="text-sm font-semibold text-slate-700">Last Name</span>
+                  <input
+                    autoComplete="family-name"
+                    className={inputClass(fieldErrors.lastName)}
+                    name="lastName"
+                    onChange={(event) => updateDraft("lastName", event.target.value)}
+                    placeholder="Enter your last name"
+                    value={draft.lastName}
+                  />
+                  {fieldErrors.lastName ? (
+                    <span className="mt-1.5 block text-xs font-medium text-red-600">
+                      {fieldErrors.lastName}
+                    </span>
+                  ) : null}
+                </label>
+              </div>
+            </>
+          )}
+
+          {step === 2 && (
+            <>
+              <fieldset>
+                <legend className="text-sm font-semibold text-slate-700">
+                  Choose Your Role
+                </legend>
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                  <RoleOption
+                    checked={draft.role === "employee"}
+                    description="Manage your career documents"
+                    icon={<User className="h-5 w-5" />}
+                    label="Employee"
+                    onSelect={() => updateDraft("role", "employee")}
+                    value="employee"
+                  />
+                  <RoleOption
+                    checked={draft.role === "recruiter"}
+                    description="Collect candidate documents"
+                    icon={<BriefcaseBusiness className="h-5 w-5" />}
+                    label="Recruiter"
+                    onSelect={() => updateDraft("role", "recruiter")}
+                    value="recruiter"
+                  />
+                </div>
+                {fieldErrors.role ? (
+                  <span className="mt-1.5 block text-xs font-medium text-red-600">
+                    {fieldErrors.role}
+                  </span>
+                ) : null}
+              </fieldset>
               <label className="block">
                 <span className="text-sm font-semibold text-slate-700">Email</span>
                 <input
                   autoComplete="email"
-                  className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
-                  defaultValue={isLogin ? loginPrefillEmail : undefined}
+                  className={inputClass(fieldErrors.email)}
                   name="email"
+                  onChange={(event) => updateDraft("email", event.target.value)}
                   placeholder="Enter your email"
-                  required
                   type="email"
+                  value={draft.email}
                 />
+                {fieldErrors.email ? (
+                  <span className="mt-1.5 block text-xs font-medium text-red-600">
+                    {fieldErrors.email}
+                  </span>
+                ) : null}
               </label>
-            )}
+            </>
+          )}
 
-            {(isSignup || isLogin || isReset) && (
+          {step === 3 && (
+            <>
               <label className="block">
-                <span className="text-sm font-semibold text-slate-700">
-                  {isReset ? "New password" : "Password"}
-                </span>
-                <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
+                <span className="text-sm font-semibold text-slate-700">Password</span>
+                <div
+                  className={`mt-2 flex h-11 items-center rounded-[20px] border px-3 focus-within:border-blue-400 ${
+                    fieldErrors.password ? "border-red-300" : "border-slate-200"
+                  }`}
+                >
                   <input
-                    autoComplete={isSignup ? "new-password" : isReset ? "new-password" : "current-password"}
+                    autoComplete="new-password"
                     className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
-                    minLength={8}
                     name="password"
-                    placeholder={isReset ? "Enter your new password" : "Enter your password"}
-                    required
+                    onChange={(event) => updateDraft("password", event.target.value)}
+                    placeholder="Create a password"
                     type={showPassword ? "text" : "password"}
+                    value={draft.password}
                   />
                   <button
                     aria-label={showPassword ? "Hide password" : "Show password"}
@@ -1506,110 +2090,157 @@ function AuthScreen({
                     )}
                   </button>
                 </div>
-                {isLogin && (
-                  <span className="mt-2 flex justify-end">
-                    <button
-                      className="text-sm font-semibold text-blue-700 transition hover:text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      onClick={() => onAuthModeChange("forgot")}
-                      type="button"
-                    >
-                      Forgot Password?
-                    </button>
+                {fieldErrors.password ? (
+                  <span className="mt-1.5 block text-xs font-medium text-red-600">
+                    {fieldErrors.password}
                   </span>
-                )}
+                ) : null}
               </label>
-            )}
-
-            {isVerify && (
               <label className="block">
-                <span className="text-sm font-semibold text-slate-700">Verification code</span>
-                <input
-                  className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-center text-lg font-bold tracking-[0.35em] outline-none focus:border-blue-400"
-                  inputMode="numeric"
-                  maxLength={6}
-                  minLength={6}
-                  name="code"
-                  placeholder="000000"
-                  required
-                />
-              </label>
-            )}
-
-            {isReset && (
-              <>
-                <label className="block">
-                  <span className="text-sm font-semibold text-slate-700">
-                    Confirm new password
+                <span className="text-sm font-semibold text-slate-700">
+                  Confirm password
+                </span>
+                <div
+                  className={`mt-2 flex h-11 items-center rounded-[20px] border px-3 focus-within:border-blue-400 ${
+                    fieldErrors.confirmPassword ? "border-red-300" : "border-slate-200"
+                  }`}
+                >
+                  <input
+                    autoComplete="new-password"
+                    className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
+                    name="confirmPassword"
+                    onChange={(event) =>
+                      updateDraft("confirmPassword", event.target.value)
+                    }
+                    placeholder="Confirm your password"
+                    type={showConfirmPassword ? "text" : "password"}
+                    value={draft.confirmPassword}
+                  />
+                  <button
+                    aria-label={showConfirmPassword ? "Hide password" : "Show password"}
+                    className="ml-2 text-slate-400 transition hover:text-blue-700"
+                    onClick={() => setShowConfirmPassword((current) => !current)}
+                    type="button"
+                  >
+                    {showConfirmPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+                {fieldErrors.confirmPassword ? (
+                  <span className="mt-1.5 block text-xs font-medium text-red-600">
+                    {fieldErrors.confirmPassword}
                   </span>
-                  <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
-                    <input
-                      autoComplete="new-password"
-                      className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
-                      minLength={8}
-                      name="confirmPassword"
-                      placeholder="Confirm your new password"
-                      required
-                      type={showConfirmPassword ? "text" : "password"}
-                    />
-                    <button
-                      aria-label={showConfirmPassword ? "Hide password" : "Show password"}
-                      className="ml-2 text-slate-400 transition hover:text-blue-700"
-                      onClick={() => setShowConfirmPassword((current) => !current)}
-                      type="button"
-                    >
-                      {showConfirmPassword ? (
-                        <EyeOff className="h-4 w-4" />
-                      ) : (
-                        <Eye className="h-4 w-4" />
-                      )}
-                    </button>
-                  </div>
-                </label>
-                <p className="rounded-[20px] bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
-                  Use at least 8 characters with uppercase, lowercase, and a number.
-                </p>
-              </>
-            )}
-          </div>
+                ) : null}
+              </label>
+              <p className="rounded-[20px] bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
+                Use at least 8 characters with uppercase, lowercase, and a number.
+              </p>
+            </>
+          )}
 
+          {step === 4 && (
+            <>
+              <input name="firstName" type="hidden" value={draft.firstName} />
+              <input name="lastName" type="hidden" value={draft.lastName} />
+              <input name="email" type="hidden" value={draft.email} />
+              <input name="role" type="hidden" value={draft.role} />
+              <input name="password" type="hidden" value={draft.password} />
+              <input name="confirmPassword" type="hidden" value={draft.confirmPassword} />
+              <div className="space-y-3 rounded-[20px] border border-slate-200 bg-slate-50 p-4 text-sm">
+                <ReviewRow label="Name" value={`${draft.firstName} ${draft.lastName}`} />
+                <ReviewRow
+                  label="Role"
+                  value={draft.role === "recruiter" ? "Recruiter" : "Employee"}
+                />
+                <ReviewRow label="Email" value={draft.email} />
+                <ReviewRow label="Password" value="••••••••" />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-5 shrink-0 space-y-3">
+        <div className={`grid gap-3 ${step > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+          {step > 1 ? (
+            <button
+              className="h-11 w-full rounded-[20px] border border-slate-200 bg-white text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+              onClick={goBack}
+              type="button"
+            >
+              Back
+            </button>
+          ) : null}
           <button
-            className="mt-6 h-11 w-full rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+            className="h-11 w-full rounded-[20px] bg-blue-600 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
             disabled={isLoading}
+            type="submit"
           >
-            {isLoading ? "Please wait..." : submitLabel}
+            {isLoading
+              ? "Please wait..."
+              : step === signupStepCount
+                ? "Create Account"
+                : "Next"}
           </button>
+        </div>
+        <button
+          className="w-full text-sm font-semibold text-blue-700"
+          onClick={() => onAuthModeChange("login")}
+          type="button"
+        >
+          Already have an account? Sign in
+        </button>
+      </div>
+    </form>
+  );
+}
 
-          {isVerify && (
-            <button
-              className="mt-4 w-full text-sm font-semibold text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400"
-              disabled={isLoading || resendSeconds > 0}
-              onClick={onResendCode}
-              type="button"
-            >
-              {resendSeconds > 0 ? `Resend Code in ${resendSeconds}s` : "Resend Code"}
-            </button>
-          )}
+function ReviewRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <span className="shrink-0 text-slate-500">{label}</span>
+      <span className="truncate text-right font-semibold text-slate-900">{value}</span>
+    </div>
+  );
+}
 
-          <button
-            className="mt-4 w-full text-sm font-semibold text-blue-700"
-            onClick={() => onAuthModeChange(isSignup ? "login" : "signup")}
-            type="button"
-          >
-            {isSignup ? "Already have an account? Sign in" : "I don't have an account"}
-          </button>
-
-          {(isForgot || isVerify || isReset) && (
-            <button
-              className="mt-3 w-full text-sm font-semibold text-slate-500 transition hover:text-slate-800"
-              onClick={() => onAuthModeChange("login")}
-              type="button"
-            >
-              Back to Login
-            </button>
-          )}
-        </form>
-      </section>
-    </main>
+function RoleOption({
+  checked,
+  description,
+  icon,
+  label,
+  onSelect,
+  value,
+}: {
+  checked?: boolean;
+  description: string;
+  icon: React.ReactNode;
+  label: string;
+  onSelect?: () => void;
+  value: AccountRole;
+}) {
+  return (
+    <label className="relative cursor-pointer">
+      <input
+        checked={checked}
+        className="peer sr-only"
+        name="role"
+        onChange={() => onSelect?.()}
+        required={!onSelect}
+        type="radio"
+        value={value}
+      />
+      <span className="flex min-h-[5.5rem] flex-col rounded-[20px] border border-slate-200 bg-white p-3 text-left transition hover:border-blue-200 hover:bg-blue-50/40 peer-checked:border-blue-500 peer-checked:bg-blue-50 peer-checked:shadow-[0_0_0_3px_rgba(59,130,246,0.12)] peer-focus-visible:ring-4 peer-focus-visible:ring-blue-100">
+        <span className="flex h-9 w-9 items-center justify-center rounded-[16px] bg-slate-100 text-slate-600 peer-checked:bg-blue-600 peer-checked:text-white">
+          {icon}
+        </span>
+        <span className="mt-2 text-sm font-bold text-slate-900">{label}</span>
+        <span className="mt-1 text-[11px] leading-4 text-slate-500">{description}</span>
+      </span>
+    </label>
   );
 }
 
@@ -1636,7 +2267,7 @@ function TopNav({
   setQuery: (value: string) => void;
   user: UserProfile;
 }) {
-  const initials = getInitials(user.name);
+  const initials = getInitials(getProfileName(user), user.lastName);
   const desktopSearchRef = useRef<HTMLDivElement>(null);
   const mobileSearchRef = useRef<HTMLDivElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -1678,6 +2309,7 @@ function TopNav({
             {globalSearchResults.map((document) => (
               <li key={document.id}>
                 <button
+                  aria-selected="false"
                   className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
                   onClick={() => {
                     onGlobalSearchSelect(document);
@@ -1768,7 +2400,7 @@ function TopNav({
                   {initials}
                 </span>
                 <span className="hidden text-sm font-medium text-slate-800 sm:inline">
-                  {user.name}
+                  {getProfileName(user)}
                 </span>
                 <ChevronDown className="h-4 w-4 text-slate-500" />
               </button>
@@ -1780,7 +2412,7 @@ function TopNav({
                 className="z-50 mt-2 w-56 origin-top-right rounded-[20px] border border-slate-200 bg-white p-2 shadow-xl shadow-slate-200/70 data-[state=open]:animate-in data-[state=open]:fade-in data-[state=open]:zoom-in-95"
               >
                 <div className="mb-2 rounded-[20px] bg-slate-50 px-3 py-2">
-                  <p className="text-sm font-bold text-slate-900">{user.name}</p>
+                  <p className="text-sm font-bold text-slate-900">{getProfileName(user)}</p>
                 </div>
                 <DropdownItem icon={<User className="h-4 w-4" />} label="My Profile" />
                 <DropdownItem
@@ -1894,7 +2526,7 @@ function Sidebar({
   setScreen: (screen: Screen) => void;
   user: UserProfile;
 }) {
-  const initials = getInitials(user.name);
+  const initials = getInitials(getProfileName(user), user.lastName);
   return (
     <aside className="fixed bottom-0 left-0 top-0 z-50 hidden w-64 bg-[#0d172b] p-6 text-white shadow-2xl lg:flex lg:flex-col">
       <div className="flex items-center gap-4">
@@ -1932,7 +2564,7 @@ function Sidebar({
               {initials}
             </span>
             <div className="min-w-0">
-              <p className="truncate text-base font-bold text-white">{user.name}</p>
+              <p className="truncate text-base font-bold text-white">{getProfileName(user)}</p>
             </div>
           </div>
         </div>
@@ -2040,7 +2672,7 @@ function ProfileScreen({
   onSignOut: () => void;
   user: UserProfile;
 }) {
-  const initials = getInitials(user.name);
+  const initials = getInitials(getProfileName(user), user.lastName);
   const showSkeleton = useDelayedLoading(isLoading);
 
   return (
@@ -2068,7 +2700,7 @@ function ProfileScreen({
             {initials}
           </span>
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-bold text-slate-950">{user.name}</h1>
+            <h1 className="truncate text-xl font-bold text-slate-950">{getProfileName(user)}</h1>
             <p className="mt-1 truncate text-sm text-slate-500">{user.email}</p>
           </div>
         </div>
@@ -2214,7 +2846,7 @@ function DashboardHero({ onUpload, user }: { onUpload: () => void; user: UserPro
       <div className="relative z-10 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="max-w-3xl text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
-            {getWelcomeGreeting(user.name)}
+            {getWelcomeGreeting(getProfileName(user))}
           </h1>
           <p className="mt-3 max-w-2xl text-sm leading-6 text-blue-50 sm:text-base">
             Here&apos;s your overview, your employment history organized and ready to

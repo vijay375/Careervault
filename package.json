@@ -3,8 +3,14 @@
   "private": true,
   "scripts": {
     "dev": "npm --prefix careervault run dev",
+    "dev:hr": "npm --prefix careervault-hr run dev",
     "build": "npm --prefix careervault run build",
+    "build:hr": "npm --prefix careervault-hr run build",
     "start": "npm --prefix careervault run start",
-    "lint": "npm --prefix careervault run lint"
+    "start:hr": "npm --prefix careervault-hr run start",
+    "lint": "npm --prefix careervault run lint && npm --prefix careervault-hr run lint",
+    "setup:email": "node scripts/setup-resend-domain.mjs",
+    "configure:resend": "node scripts/configure-resend-from-api.mjs",
+    "check:email-status": "node scripts/check-email-status.mjs"
   }
 }

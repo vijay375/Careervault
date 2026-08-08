@@ -1,38 +1,45 @@
 import {
   createHash,
+  createHmac,
   randomBytes,
   randomInt,
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
 import { promisify } from "node:util";
-import nodemailer from "nodemailer";
-import { Pool } from "pg";
-import type { QueryResultRow } from "pg";
 import type { VaultDocument } from "@/lib/careervault-data";
-import { getSmtpConfig, getSmtpConfigStatus, buildPasswordResetEmailContent, sendViaBrevoApi } from "@/lib/smtp-config";
+import { ensureDatabaseSchema, query, withTransaction } from "@/lib/database";
+import {
+  buildPasswordResetEmailContent,
+  buildSignupMagicLinkEmailContent,
+  getFriendlyEmailDeliveryMessage,
+  getRequestEmailStatus,
+  isDevelopmentEmailFallbackEnabled,
+  sendRequestEmail,
+  type RequestEmailContent,
+} from "@/lib/request-email";
 
 const scrypt = promisify(scryptCallback);
 const resetExpiryMs = 10 * 60 * 1000;
 const resendCooldownMs = 60 * 1000;
 const sessionExpiryMs = 7 * 24 * 60 * 60 * 1000;
 const maxVerificationAttempts = 5;
-const databaseUrl = process.env.DATABASE_URL;
-
-let schemaReady: Promise<void> | null = null;
-const pool = databaseUrl
-  ? new Pool({
-      connectionString: databaseUrl,
-      ssl: databaseUrl.includes("supabase.co") ? { rejectUnauthorized: false } : undefined,
-    })
-  : null;
+const signupMagicLinkExpiryMs = 24 * 60 * 60 * 1000;
+const signupPasswordWindowMs = 15 * 60 * 1000;
+const maxOtpSendsPerHour = 5;
+const otpSendWindowMs = 60 * 60 * 1000;
 
 type UserRecord = {
   id: string;
   name: string;
   email: string;
   password_hash: string;
+  role: AccountRole;
+  first_name?: string | null;
+  last_name?: string | null;
 };
+
+export type AccountRole = "employee" | "recruiter";
 
 type PasswordResetRecord = {
   email: string;
@@ -42,15 +49,39 @@ type PasswordResetRecord = {
   resend_available_at: Date;
   verified: boolean;
   attempts: number;
+  send_count?: number;
+  send_window_started_at?: Date | null;
+};
+
+type SignupVerificationRecord = {
+  email: string;
+  name: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  role: AccountRole;
+  code_hash: string;
+  salt: string;
+  token_hash?: string | null;
+  expires_at: Date;
+  resend_available_at: Date;
+  verified: boolean;
+  attempts: number;
+  used_at?: Date | null;
+  password_setup_token_hash?: string | null;
+  password_setup_expires_at?: Date | null;
+  send_count?: number;
+  send_window_started_at?: Date | null;
 };
 
 type EmailDeliveryResult =
   | {
       ok: true;
-      mode: "smtp" | "brevo-api";
+      mode: "brevo" | "resend" | "development";
       messageId?: string;
       accepted: string[];
       rejected: string[];
+      developmentCode?: string;
+      developmentVerifyUrl?: string;
     }
   | {
       ok: false;
@@ -86,6 +117,9 @@ export type PublicUser = {
   id: string;
   name: string;
   email: string;
+  role: AccountRole;
+  firstName: string;
+  lastName: string;
 };
 
 export type StoredDocument = VaultDocument & {
@@ -108,8 +142,42 @@ export const passwordResetConfig = {
   resetExpiryMinutes: resetExpiryMs / 1000 / 60,
 };
 
+export const signupVerificationConfig = {
+  resendCooldownSeconds: resendCooldownMs / 1000,
+  magicLinkExpiryHours: signupMagicLinkExpiryMs / 1000 / 60 / 60,
+  passwordSetupExpiryMinutes: signupPasswordWindowMs / 1000 / 60,
+};
+
 export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
+}
+
+function toEpochMs(value: Date | string | number) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  return new Date(value).getTime();
+}
+
+function isOtpSendRateLimited(
+  sendCount: number | undefined,
+  windowStartedAt: Date | string | null | undefined,
+) {
+  if (!windowStartedAt) {
+    return false;
+  }
+
+  const windowStart = toEpochMs(windowStartedAt);
+  if (Date.now() - windowStart >= otpSendWindowMs) {
+    return false;
+  }
+
+  return (sendCount ?? 0) >= maxOtpSendsPerHour;
 }
 
 export function getPasswordPolicyMessage(password: string) {
@@ -133,27 +201,55 @@ export function getPasswordPolicyMessage(password: string) {
 }
 
 export function getEmailServiceStatus() {
-  return getSmtpConfigStatus();
+  return getRequestEmailStatus();
 }
 
 export async function createAccount({
-  name,
   email,
   password,
+  role,
+  firstName,
+  lastName,
+  name,
 }: {
-  name: string;
   email: string;
   password: string;
+  role: AccountRole;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
 }) {
   const normalizedEmail = normalizeEmail(email);
   const passwordMessage = getPasswordPolicyMessage(password);
-
-  if (!name.trim()) {
-    return { ok: false, status: 400, message: "Please enter your full name." };
-  }
+  const accountRole = role;
+  const resolvedFirstName = String(firstName || "").trim();
+  const resolvedLastName = String(lastName || "").trim();
+  const legacyName = String(name || "").trim();
+  const profileFirstName =
+    resolvedFirstName ||
+    (legacyName ? legacyName.split(/\s+/)[0] : "") ||
+    normalizedEmail.split("@")[0] ||
+    normalizedEmail;
+  const profileLastName =
+    resolvedLastName ||
+    (legacyName.includes(" ")
+      ? legacyName.split(/\s+/).slice(1).join(" ")
+      : "");
 
   if (!normalizedEmail) {
     return { ok: false, status: 400, message: "Please enter your email address." };
+  }
+
+  if (!resolvedFirstName && !legacyName) {
+    return { ok: false, status: 400, message: "Please enter your first name." };
+  }
+
+  if (!resolvedLastName && !legacyName) {
+    return { ok: false, status: 400, message: "Please enter your last name." };
+  }
+
+  if (accountRole !== "employee" && accountRole !== "recruiter") {
+    return { ok: false, status: 400, message: "Please choose an account type." };
   }
 
   if (passwordMessage) {
@@ -161,6 +257,7 @@ export async function createAccount({
   }
 
   await ensureSchema();
+
   const existingUser = await query<UserRecord>("select id from users where email = $1", [
     normalizedEmail,
   ]);
@@ -173,16 +270,384 @@ export async function createAccount({
     };
   }
 
-  await query(
-    `insert into users (name, email, password_hash)
-     values ($1, $2, $3)`,
-    [name.trim(), normalizedEmail, await hashPassword(password)],
-  );
+  const passwordHash = await hashPassword(password);
+  await withTransaction(async (client) => {
+    const created = await client.query<{ id: string }>(
+      `insert into users (name, email, password_hash, role, first_name, last_name)
+       values ($1, $2, $3, $4, $5, $6)
+       returning id`,
+      [
+        profileFirstName,
+        normalizedEmail,
+        passwordHash,
+        accountRole,
+        profileFirstName,
+        profileLastName,
+      ],
+    );
+
+    if (accountRole === "recruiter") {
+      await client.query(
+        `insert into hr_users (id, name, email, password_hash, first_name, last_name)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (email) do update
+         set name = excluded.name,
+             first_name = excluded.first_name,
+             last_name = excluded.last_name,
+             password_hash = excluded.password_hash,
+             updated_at = now()`,
+        [
+          created.rows[0].id,
+          profileFirstName,
+          normalizedEmail,
+          passwordHash,
+          profileFirstName,
+          profileLastName,
+        ],
+      );
+    }
+
+    await client.query("delete from signup_verifications where email = $1", [
+      normalizedEmail,
+    ]);
+  });
 
   return {
     ok: true,
     status: 201,
-    message: "Account created successfully. Please sign in with your new credentials.",
+    message: "Account created successfully. Please log in to continue.",
+  };
+}
+
+export async function startSignupVerification({
+  firstName,
+  lastName,
+  name,
+  email,
+  role,
+}: {
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+  email: string;
+  role: AccountRole;
+}) {
+  const normalizedEmail = normalizeEmail(email);
+  const resolvedFirstName = String(firstName || "").trim();
+  const resolvedLastName = String(lastName || "").trim();
+  const resolvedName =
+    [resolvedFirstName, resolvedLastName].filter(Boolean).join(" ").trim() ||
+    String(name || "").trim();
+
+  if (!resolvedFirstName || !resolvedLastName) {
+    if (!resolvedName) {
+      return { ok: false, status: 400, message: "Please enter your first and last name." };
+    }
+  }
+
+  if (!resolvedFirstName && resolvedName) {
+    // Backward-compatible single name field
+  } else if (!resolvedFirstName || !resolvedLastName) {
+    return { ok: false, status: 400, message: "Please enter your first and last name." };
+  }
+
+  const accountName =
+    resolvedFirstName && resolvedLastName
+      ? `${resolvedFirstName} ${resolvedLastName}`
+      : resolvedName;
+
+  if (!normalizedEmail) {
+    return { ok: false, status: 400, message: "Please enter your email address." };
+  }
+
+  if (role !== "employee" && role !== "recruiter") {
+    return { ok: false, status: 400, message: "Please choose an account type." };
+  }
+
+  await ensureSchema();
+
+  const existingUser = await query<UserRecord>("select id from users where email = $1", [
+    normalizedEmail,
+  ]);
+
+  if (existingUser.rowCount) {
+    return {
+      ok: false,
+      status: 409,
+      message: "An account already exists with this email address. Please sign in.",
+    };
+  }
+
+  const existingVerification = await query<SignupVerificationRecord>(
+    "select * from signup_verifications where email = $1",
+    [normalizedEmail],
+  );
+  const current = existingVerification.rows[0];
+
+  if (current && Date.now() < toEpochMs(current.resend_available_at)) {
+    return {
+      ok: false,
+      status: 429,
+      message: "Please wait before requesting another verification email.",
+      resendAvailableAt: toEpochMs(current.resend_available_at),
+      expiresAt: toEpochMs(current.expires_at),
+    };
+  }
+
+  if (current && isOtpSendRateLimited(current.send_count, current.send_window_started_at)) {
+    return {
+      ok: false,
+      status: 429,
+      message:
+        "Too many verification emails were requested for this email. Please try again in about an hour.",
+    };
+  }
+
+  const magic = buildSignedMagicToken();
+  const salt = randomBytes(16).toString("hex");
+  const expiresAt = Date.now() + signupMagicLinkExpiryMs;
+  const resendAvailableAt = Date.now() + resendCooldownMs;
+  const first = resolvedFirstName || accountName.split(" ")[0] || accountName;
+  const last =
+    resolvedLastName || accountName.split(" ").slice(1).join(" ") || accountName;
+
+  await query(
+    `insert into signup_verifications
+      (email, name, first_name, last_name, role, code_hash, salt, token_hash, expires_at, resend_available_at,
+       verified, attempts, used_at, password_setup_token_hash, password_setup_expires_at,
+       send_count, send_window_started_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, 0, null, null, null, 1, now())
+     on conflict (email) do update set
+      name = excluded.name,
+      first_name = excluded.first_name,
+      last_name = excluded.last_name,
+      role = excluded.role,
+      code_hash = excluded.code_hash,
+      salt = excluded.salt,
+      token_hash = excluded.token_hash,
+      expires_at = excluded.expires_at,
+      resend_available_at = excluded.resend_available_at,
+      verified = false,
+      attempts = 0,
+      used_at = null,
+      password_setup_token_hash = null,
+      password_setup_expires_at = null,
+      send_count = case
+        when signup_verifications.send_window_started_at is null
+          or signup_verifications.send_window_started_at < now() - interval '1 hour'
+        then 1
+        else signup_verifications.send_count + 1
+      end,
+      send_window_started_at = case
+        when signup_verifications.send_window_started_at is null
+          or signup_verifications.send_window_started_at < now() - interval '1 hour'
+        then now()
+        else signup_verifications.send_window_started_at
+      end,
+      updated_at = now()`,
+    [
+      normalizedEmail,
+      accountName,
+      first,
+      last,
+      role,
+      magic.tokenHash,
+      salt,
+      magic.tokenHash,
+      new Date(expiresAt),
+      new Date(resendAvailableAt),
+    ],
+  );
+
+  const verifyUrl = `${getAppUrl()}/verify-email?token=${encodeURIComponent(magic.signedToken)}`;
+  const delivery = await sendSignupMagicLinkEmail(accountName, normalizedEmail, verifyUrl);
+
+  if (!delivery.ok) {
+    await query(
+      `update signup_verifications
+       set resend_available_at = now(), updated_at = now()
+       where email = $1`,
+      [normalizedEmail],
+    );
+
+    return {
+      ok: false,
+      status: 503,
+      message: delivery.message,
+      resendAvailableAt: Date.now(),
+      expiresAt,
+      deliveryMode: delivery.mode,
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    message:
+      delivery.mode === "development"
+        ? "Development mode: open the verification link shown below to continue."
+        : "Check your email for a CareerVault verification link.",
+    resendAvailableAt,
+    expiresAt,
+    deliveryMode: delivery.mode,
+    developmentVerifyUrl: delivery.developmentVerifyUrl,
+  };
+}
+
+export async function resendSignupVerificationCode(email: string) {
+  await ensureSchema();
+  const normalizedEmail = normalizeEmail(email);
+  const existing = await query<SignupVerificationRecord>(
+    "select * from signup_verifications where email = $1",
+    [normalizedEmail],
+  );
+  const verification = existing.rows[0];
+
+  if (!verification) {
+    return {
+      ok: false,
+      status: 404,
+      message: "Please start signup again to request a verification email.",
+    };
+  }
+
+  if (Date.now() < toEpochMs(verification.resend_available_at)) {
+    return {
+      ok: false,
+      status: 429,
+      message: "Please wait before requesting another verification email.",
+      resendAvailableAt: toEpochMs(verification.resend_available_at),
+      expiresAt: toEpochMs(verification.expires_at),
+    };
+  }
+
+  return startSignupVerification({
+    firstName: verification.first_name || undefined,
+    lastName: verification.last_name || undefined,
+    name: verification.name,
+    email: normalizedEmail,
+    role: verification.role,
+  });
+}
+
+export async function verifySignupMagicLink(token: string) {
+  await ensureSchema();
+  const signedToken = String(token || "").trim();
+  if (!signedToken) {
+    return {
+      ok: false,
+      status: 400,
+      reason: "invalid" as const,
+      message: "Invalid verification link.",
+    };
+  }
+
+  const rawToken = parseSignedMagicToken(signedToken);
+  if (!rawToken) {
+    return {
+      ok: false,
+      status: 400,
+      reason: "invalid" as const,
+      message: "Invalid verification link.",
+    };
+  }
+
+  const tokenHash = hashToken(rawToken);
+  const verificationResult = await query<SignupVerificationRecord>(
+    `select * from signup_verifications
+     where token_hash = $1 or code_hash = $1
+     order by updated_at desc
+     limit 1`,
+    [tokenHash],
+  );
+  const verification = verificationResult.rows[0];
+
+  if (!verification) {
+    return {
+      ok: false,
+      status: 400,
+      reason: "invalid" as const,
+      message: "Invalid verification link.",
+    };
+  }
+
+  if (verification.used_at) {
+    if (
+      verification.verified &&
+      verification.password_setup_token_hash &&
+      verification.password_setup_expires_at &&
+      Date.now() <= toEpochMs(verification.password_setup_expires_at)
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        reason: "already_used" as const,
+        message: "This email is already verified. Continue creating your password or sign in.",
+        email: verification.email,
+      };
+    }
+
+    return {
+      ok: false,
+      status: 409,
+      reason: "already_used" as const,
+      message: "This email is already verified. Please sign in.",
+      email: verification.email,
+    };
+  }
+
+  if (verification.verified) {
+    return {
+      ok: false,
+      status: 409,
+      reason: "already_used" as const,
+      message: "This email is already verified. Please sign in.",
+      email: verification.email,
+    };
+  }
+
+  if (Date.now() > toEpochMs(verification.expires_at)) {
+    return {
+      ok: false,
+      status: 410,
+      reason: "expired" as const,
+      message: "This verification link has expired. Request a new verification email.",
+      email: verification.email,
+    };
+  }
+
+  const setup = buildOpaqueToken();
+  const passwordSetupExpiresAt = Date.now() + signupPasswordWindowMs;
+
+  await query(
+    `update signup_verifications
+     set verified = true,
+         used_at = now(),
+         password_setup_token_hash = $2,
+         password_setup_expires_at = $3,
+         expires_at = $3,
+         updated_at = now()
+     where email = $1`,
+    [verification.email, setup.tokenHash, new Date(passwordSetupExpiresAt)],
+  );
+
+  return {
+    ok: true,
+    status: 200,
+    reason: "verified" as const,
+    message: "Email verified. Please create your password.",
+    email: verification.email,
+    setupToken: setup.rawToken,
+    expiresAt: passwordSetupExpiresAt,
+  };
+}
+
+/** @deprecated OTP signup removed — use verifySignupMagicLink */
+export async function verifySignupCode(_email: string, _code: string) {
+  return {
+    ok: false,
+    status: 410,
+    message: "OTP verification has been replaced. Please use the email verification link.",
   };
 }
 
@@ -257,11 +722,28 @@ export async function requestPasswordReset(email: string) {
     };
   }
 
-  const reset = buildPasswordReset(normalizedEmail);
+  const existingReset = await query<PasswordResetRecord>(
+    "select * from password_resets where email = $1",
+    [normalizedEmail],
+  );
+  const currentReset = existingReset.rows[0];
+
+  if (
+    currentReset &&
+    isOtpSendRateLimited(currentReset.send_count, currentReset.send_window_started_at)
+  ) {
+    return {
+      ok: false,
+      status: 429,
+      message: "Too many verification codes were requested for this email. Please try again in about an hour.",
+    };
+  }
+
+  const reset = buildVerificationCode(normalizedEmail);
   await query(
     `insert into password_resets
-      (email, code_hash, salt, expires_at, resend_available_at, verified, attempts)
-     values ($1, $2, $3, $4, $5, false, 0)
+      (email, code_hash, salt, expires_at, resend_available_at, verified, attempts, send_count, send_window_started_at)
+     values ($1, $2, $3, $4, $5, false, 0, 1, now())
      on conflict (email) do update set
       code_hash = excluded.code_hash,
       salt = excluded.salt,
@@ -269,6 +751,18 @@ export async function requestPasswordReset(email: string) {
       resend_available_at = excluded.resend_available_at,
       verified = false,
       attempts = 0,
+      send_count = case
+        when password_resets.send_window_started_at is null
+          or password_resets.send_window_started_at < now() - interval '1 hour'
+        then 1
+        else password_resets.send_count + 1
+      end,
+      send_window_started_at = case
+        when password_resets.send_window_started_at is null
+          or password_resets.send_window_started_at < now() - interval '1 hour'
+        then now()
+        else password_resets.send_window_started_at
+      end,
       updated_at = now()`,
     [
       reset.record.email,
@@ -293,9 +787,13 @@ export async function requestPasswordReset(email: string) {
   return {
     ok: true,
     status: 200,
-    message: "A 6-digit verification code has been sent to your registered email.",
+    message:
+      delivery.mode === "development"
+        ? "Development mode: use the verification code shown in the app or terminal."
+        : "A 6-digit verification code has been sent to your registered email.",
     resendAvailableAt: reset.record.resendAvailableAt,
     deliveryMode: delivery.mode,
+    developmentCode: delivery.developmentCode,
   };
 }
 
@@ -308,12 +806,12 @@ export async function resendPasswordResetCode(email: string) {
   );
   const reset = existingReset.rows[0];
 
-  if (reset && Date.now() < reset.resend_available_at.getTime()) {
+  if (reset && Date.now() < toEpochMs(reset.resend_available_at)) {
     return {
       ok: false,
       status: 429,
       message: "Please wait before requesting another verification code.",
-      resendAvailableAt: reset.resend_available_at.getTime(),
+      resendAvailableAt: toEpochMs(reset.resend_available_at),
     };
   }
 
@@ -337,7 +835,7 @@ export async function verifyPasswordResetCode(email: string, code: string) {
     };
   }
 
-  if (Date.now() > reset.expires_at.getTime()) {
+  if (Date.now() > toEpochMs(reset.expires_at)) {
     await query("delete from password_resets where email = $1", [normalizedEmail]);
     return {
       ok: false,
@@ -408,7 +906,7 @@ export async function resetPassword({
     };
   }
 
-  if (Date.now() > reset.expires_at.getTime()) {
+  if (Date.now() > toEpochMs(reset.expires_at)) {
     await query("delete from password_resets where email = $1", [normalizedEmail]);
     return {
       ok: false,
@@ -526,7 +1024,26 @@ export async function updateDocument(userId: string, document: StoredDocument) {
 
 export async function deleteDocument(userId: string, documentId: string) {
   await ensureSchema();
-  await query("delete from documents where id = $1 and user_id = $2", [documentId, userId]);
+  const submittedReference = await query<{ exists: boolean }>(
+    `select exists (
+       select 1
+       from document_request_items request_items
+       join document_requests requests on requests.id = request_items.request_id
+       where request_items.submitted_document_id = $1
+         and requests.status = 'submitted'
+     )`,
+    [documentId],
+  );
+
+  if (submittedReference.rows[0]?.exists) {
+    return "referenced" as const;
+  }
+
+  const result = await query("delete from documents where id = $1 and user_id = $2", [
+    documentId,
+    userId,
+  ]);
+  return (result.rowCount || 0) > 0 ? ("deleted" as const) : ("not_found" as const);
 }
 
 export async function markDocumentViewed(userId: string, documentId: string) {
@@ -565,84 +1082,7 @@ export async function getDocumentFile(userId: string, documentId: string) {
 }
 
 async function ensureSchema() {
-  if (!schemaReady) {
-    schemaReady = createSchema();
-  }
-
-  return schemaReady;
-}
-
-async function createSchema() {
-  await query("create extension if not exists pgcrypto");
-  await query(`
-    create table if not exists users (
-      id uuid primary key default gen_random_uuid(),
-      name text not null,
-      email text not null unique,
-      password_hash text not null,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    )
-  `);
-  await query(`
-    create table if not exists sessions (
-      token_hash text primary key,
-      user_id uuid not null references users(id) on delete cascade,
-      expires_at timestamptz not null,
-      created_at timestamptz not null default now()
-    )
-  `);
-  await query(`
-    create table if not exists password_resets (
-      email text primary key,
-      code_hash text not null,
-      salt text not null,
-      expires_at timestamptz not null,
-      resend_available_at timestamptz not null,
-      verified boolean not null default false,
-      attempts integer not null default 0,
-      updated_at timestamptz not null default now()
-    )
-  `);
-  await query(`
-    create table if not exists documents (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid not null references users(id) on delete cascade,
-      company_name text not null,
-      employee_name text not null,
-      designation text not null,
-      joining_date date not null,
-      relieving_date date,
-      document_type text not null,
-      salary_info text,
-      file_name text not null,
-      file_size text not null,
-      uploaded_at timestamptz not null default now(),
-      status text not null,
-      description text,
-      file_type text not null,
-      extracted_text text,
-      extracted_at date,
-      employment_period text,
-      salary_month text,
-      original_file_name text,
-      file_mime_type text,
-      file_data text not null,
-      last_viewed date,
-      updated_at timestamptz not null default now()
-    )
-  `);
-}
-
-async function query<T extends QueryResultRow = QueryResultRow>(
-  sql: string,
-  values: unknown[] = [],
-) {
-  if (!pool) {
-    throw new Error("DATABASE_URL is not configured.");
-  }
-
-  return pool.query<T>(sql, values);
+  return ensureDatabaseSchema();
 }
 
 async function createSession(userId: string) {
@@ -682,7 +1122,7 @@ async function verifyPassword(password: string, storedHash: string) {
   );
 }
 
-function buildPasswordReset(email: string) {
+function buildVerificationCode(email: string) {
   const now = Date.now();
   const code = String(randomInt(100000, 1000000));
   const salt = randomBytes(16).toString("hex");
@@ -713,128 +1153,204 @@ function verifySecret(value: string, salt: string, hash: string) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+function getAppUrl() {
+  return (
+    process.env.NEXT_PUBLIC_APP_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000")
+  );
+}
+
+async function sendSignupMagicLinkEmail(
+  userName: string,
+  email: string,
+  verifyUrl: string,
+): Promise<EmailDeliveryResult> {
+  return deliverAuthOtpEmail({
+    to: email,
+    code: "",
+    developmentVerifyUrl: verifyUrl,
+    content: buildSignupMagicLinkEmailContent(
+      userName,
+      verifyUrl,
+      signupVerificationConfig.magicLinkExpiryHours,
+    ),
+    idempotencyKey: `signup-magic/${email}/${createHash("sha256").update(verifyUrl).digest("hex")}`,
+    unconfiguredMessage: "Email service is not configured for production delivery.",
+    failureLogLabel: "signup magic link",
+  });
+}
+
 async function sendPasswordResetEmail(
   user: UserRecord,
   code: string,
 ): Promise<EmailDeliveryResult> {
-  const status = getEmailServiceStatus();
-  const appUrl =
-    process.env.NEXT_PUBLIC_APP_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
-  const content = buildPasswordResetEmailContent(
-    user.name,
+  return deliverAuthOtpEmail({
+    to: user.email,
     code,
-    passwordResetConfig.resetExpiryMinutes,
-    appUrl,
-  );
+    content: buildPasswordResetEmailContent(
+      user.name,
+      code,
+      passwordResetConfig.resetExpiryMinutes,
+      getAppUrl(),
+    ),
+    idempotencyKey: `password-reset/${user.id}/${createHash("sha256").update(code).digest("hex")}`,
+    unconfiguredMessage:
+      "Email service is not configured for production delivery.",
+    failureLogLabel: "password reset",
+  });
+}
+
+async function deliverAuthOtpEmail({
+  to,
+  code,
+  content,
+  idempotencyKey,
+  unconfiguredMessage,
+  failureLogLabel,
+  developmentVerifyUrl,
+}: {
+  to: string;
+  code: string;
+  content: RequestEmailContent;
+  idempotencyKey: string;
+  unconfiguredMessage: string;
+  failureLogLabel: string;
+  developmentVerifyUrl?: string;
+}): Promise<EmailDeliveryResult> {
+  const status = getEmailServiceStatus();
 
   if (!status.configured) {
+    if (isDevelopmentOtpFallbackEnabled()) {
+      console.info(`CareerVault ${failureLogLabel} generated via development fallback.`, {
+        to,
+        code: code || undefined,
+        verifyUrl: developmentVerifyUrl,
+      });
+      return {
+        ok: true,
+        mode: "development",
+        accepted: [to],
+        rejected: [],
+        developmentCode: code || undefined,
+        developmentVerifyUrl,
+      };
+    }
+
     console.error("CareerVault email delivery skipped: email provider is not fully configured.", {
       missing: status.missing,
       provider: status.provider,
+      usingTestingSender: status.usingTestingSender,
+      canSendToAnyRecipient: status.canSendToAnyRecipient,
     });
     return {
       ok: false,
       mode: "unconfigured",
       message:
-        "Email service is not configured. Please configure SMTP or Brevo API environment variables before requesting a reset code.",
+        status.missing.length > 0
+          ? `${unconfiguredMessage} ${status.setupHint}`
+          : status.setupHint || unconfiguredMessage,
     };
   }
 
-  if (status.provider === "brevo-api") {
-    try {
-      const result = await sendViaBrevoApi({ to: user.email, content });
-      console.info("CareerVault password reset email sent via Brevo API.", {
-        to: user.email,
-        messageId: result.messageId,
-      });
-      return result;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "Unknown Brevo API error";
-      console.error("CareerVault password reset email failed via Brevo API.", {
-        to: user.email,
-        error: detail,
-      });
-      return {
-        ok: false,
-        mode: "failed",
-        message:
-          "We could not send the verification email right now. Please try again shortly or contact support if the issue continues.",
-      };
-    }
-  }
-
-  const smtp = getSmtpConfig();
-  if (!smtp) {
-    return {
-      ok: false,
-      mode: "unconfigured",
-      message:
-        "Email service is not configured. Please configure SMTP environment variables before requesting a reset code.",
-    };
-  }
-
-  try {
-    const transporter = nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      auth: {
-        user: smtp.user,
-        pass: smtp.password,
-      },
-    });
-
-    await transporter.verify();
-
-    const result = await transporter.sendMail({
-      from: smtp.from,
-      to: user.email,
-      subject: content.subject,
-      text: content.text,
-      html: content.html,
-    });
-
-    console.info("CareerVault password reset email sent via SMTP.", {
-      to: user.email,
-      messageId: result.messageId,
-      accepted: result.accepted,
-      rejected: result.rejected,
-    });
-
+  const result = await sendRequestEmail(to, content, { idempotencyKey });
+  if (result.ok) {
     return {
       ok: true,
-      mode: "smtp",
+      mode: result.provider === "development" ? "development" : result.provider,
       messageId: result.messageId,
-      accepted: result.accepted.map(String),
-      rejected: result.rejected.map(String),
-    };
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "Unknown SMTP error";
-    console.error("CareerVault password reset email failed via SMTP.", {
-      to: user.email,
-      host: smtp.host,
-      port: smtp.port,
-      error: detail,
-    });
-
-    const authHint = detail.includes("535")
-      ? " Check that SMTP_USER is the Brevo SMTP login from Settings → SMTP & API, and SMTP_PASSWORD is your xsmtpsib SMTP key."
-      : "";
-
-    return {
-      ok: false,
-      mode: "failed",
-      message: `We could not send the verification email right now.${authHint} Please try again shortly or contact support if the issue continues.`,
+      accepted: [to],
+      rejected: [],
+      developmentVerifyUrl:
+        result.provider === "development" ? developmentVerifyUrl : undefined,
     };
   }
+
+  console.error(`CareerVault ${failureLogLabel} email failed via ${result.provider}.`, {
+    to,
+    error: result.error,
+  });
+  return {
+    ok: false,
+    mode: "failed",
+    message: getFriendlyEmailDeliveryMessage(result.error, result.detail || ""),
+  };
+}
+
+function isDevelopmentOtpFallbackEnabled() {
+  return isDevelopmentEmailFallbackEnabled();
+}
+
+function getAuthTokenSecret() {
+  return (
+    process.env.AUTH_TOKEN_SECRET?.trim() ||
+    process.env.SESSION_SECRET?.trim() ||
+    process.env.DATABASE_URL?.trim() ||
+    "careervault-dev-auth-secret"
+  );
+}
+
+function buildOpaqueToken() {
+  const rawToken = randomBytes(32).toString("base64url");
+  return {
+    rawToken,
+    tokenHash: hashToken(rawToken),
+  };
+}
+
+function buildSignedMagicToken() {
+  const opaque = buildOpaqueToken();
+  const signature = createHmac("sha256", getAuthTokenSecret())
+    .update(opaque.rawToken)
+    .digest("base64url");
+  return {
+    signedToken: `${opaque.rawToken}.${signature}`,
+    tokenHash: opaque.tokenHash,
+  };
+}
+
+function parseSignedMagicToken(token: string) {
+  const [rawToken, signature] = token.split(".");
+  if (!rawToken || !signature) {
+    return null;
+  }
+
+  const expected = createHmac("sha256", getAuthTokenSecret())
+    .update(rawToken)
+    .digest("base64url");
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (
+    actualBuffer.length !== expectedBuffer.length ||
+    !timingSafeEqual(actualBuffer, expectedBuffer)
+  ) {
+    return null;
+  }
+
+  return rawToken;
+}
+
+function timingSafeEqualHex(left: string, right: string) {
+  const leftBuffer = Buffer.from(left, "hex");
+  const rightBuffer = Buffer.from(right, "hex");
+  return (
+    leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer)
+  );
 }
 
 function toPublicUser(user: UserRecord): PublicUser {
+  const firstName =
+    String(user.first_name || "").trim() ||
+    String(user.name || "").trim().split(/\s+/)[0] ||
+    "";
+  const lastName = String(user.last_name || "").trim();
+
   return {
     id: user.id,
-    name: user.name,
+    name: firstName || user.name,
     email: user.email,
+    role: user.role,
+    firstName: firstName || user.name,
+    lastName,
   };
 }
 

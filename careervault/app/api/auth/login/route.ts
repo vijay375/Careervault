@@ -12,7 +12,15 @@ export async function POST(request: NextRequest) {
       String(body.password || ""),
     );
 
-    const response = NextResponse.json(result, { status: result.status });
+    const response = NextResponse.json(
+      {
+        ok: result.ok,
+        status: result.status,
+        message: result.message,
+        user: result.ok ? result.user : undefined,
+      },
+      { status: result.status },
+    );
 
     if (result.ok && result.session) {
       setSessionCookie(response, result.session);

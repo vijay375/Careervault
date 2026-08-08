@@ -3,16 +3,21 @@ import {
   deleteSession,
   getSessionUser,
   sessionCookieName,
+  type AccountRole,
   type PublicUser,
 } from "@/lib/server-auth";
 
-const useSecureCookies = process.env.VERCEL === "1";
+const useSecureCookies = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+const sessionCookieDomain = process.env.SESSION_COOKIE_DOMAIN?.trim() || undefined;
 
-export async function requireUser(request: NextRequest) {
+export async function requireUser(
+  request: NextRequest,
+  requiredRole: AccountRole | null = "employee",
+) {
   const token = request.cookies.get(sessionCookieName)?.value;
   const user = await getSessionUser(token);
 
-  return user;
+  return user && (!requiredRole || user.role === requiredRole) ? user : null;
 }
 
 export function setSessionCookie(
@@ -23,6 +28,7 @@ export function setSessionCookie(
     httpOnly: true,
     sameSite: "lax",
     secure: useSecureCookies,
+    domain: sessionCookieDomain,
     path: "/",
     expires: new Date(session.expiresAt),
   });
@@ -34,6 +40,7 @@ export async function clearSessionCookie(request: NextRequest, response: NextRes
     httpOnly: true,
     sameSite: "lax",
     secure: useSecureCookies,
+    domain: sessionCookieDomain,
     path: "/",
     expires: new Date(0),
   });
