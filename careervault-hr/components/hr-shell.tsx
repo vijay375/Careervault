@@ -151,6 +151,12 @@ export function HrShell({ children }: { children: React.ReactNode }) {
 
   async function handleSignOut() {
     clearCachedData("");
+    try {
+      window.localStorage.removeItem("careervault-screen");
+      window.sessionStorage.clear();
+    } catch {
+      // Ignore storage access errors.
+    }
     await fetch(withBasePath("/api/auth/logout"), {
       method: "POST",
       credentials: "include",

@@ -25,7 +25,7 @@ import {
   ZoomOut,
   Folder,
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, InputHTMLAttributes, useEffect, useMemo, useRef, useState } from "react";
 import {
   documentTypes,
   formatDate,
@@ -754,6 +754,11 @@ export function CareerVaultPlatform() {
       setAuthFormKey((key) => key + 1);
       setAuthMode("login");
       setAuthMessage("");
+      try {
+        window.localStorage.removeItem("careervault-screen");
+      } catch {
+        // Ignore storage access errors.
+      }
       window.history.replaceState({}, "", "/");
       return;
     }
@@ -904,7 +909,8 @@ export function CareerVaultPlatform() {
       setAuthMessage(result.message);
 
       if (result.ok) {
-        setLoginPrefillEmail(email);
+        // Keep login empty so placeholders stay visible (no retained email).
+        setLoginPrefillEmail("");
         setSignupEmail("");
         setResendAvailableAt(0);
         setOtpExpiresAt(0);
@@ -1044,6 +1050,12 @@ export function CareerVaultPlatform() {
     setResendAvailableAt(0);
     setResendSeconds(0);
     setToast("");
+    try {
+      window.localStorage.removeItem("careervault-screen");
+      window.sessionStorage.clear();
+    } catch {
+      // Ignore storage access errors.
+    }
     // Hard navigation guarantees a fresh common login form (no retained values).
     window.location.replace("/?signedOut=1");
   }
@@ -1521,6 +1533,31 @@ const emptySignupDraft = {
 type SignupDraft = typeof emptySignupDraft;
 type SignupFieldErrors = Partial<Record<keyof SignupDraft, string>>;
 
+/** Blocks browser autofill so login shows empty placeholders by default. */
+function AutofillResistantInput({
+  className,
+  defaultValue = "",
+  ...props
+}: InputHTMLAttributes<HTMLInputElement>) {
+  const [readOnly, setReadOnly] = useState(true);
+
+  return (
+    <input
+      {...props}
+      autoCapitalize="none"
+      autoCorrect="off"
+      className={className}
+      defaultValue={defaultValue}
+      onFocus={(event) => {
+        setReadOnly(false);
+        props.onFocus?.(event);
+      }}
+      readOnly={readOnly}
+      spellCheck={false}
+    />
+  );
+}
+
 function AuthScreen({
   authFormKey,
   authMode,
@@ -1640,7 +1677,11 @@ function AuthScreen({
             onSubmit={onSubmit}
           />
         ) : (
-          <form className="bg-white p-6 text-slate-950 sm:p-8" onSubmit={onSubmit}>
+          <form
+            autoComplete="off"
+            className="bg-white p-6 text-slate-950 sm:p-8"
+            onSubmit={onSubmit}
+          >
             <h2 className="text-2xl font-bold">{title}</h2>
             <p className="mt-2 text-sm text-slate-500">{subtitle}</p>
             {message && (
@@ -1659,10 +1700,10 @@ function AuthScreen({
               {(isLogin || isForgot) && (
                 <label className="block">
                   <span className="text-sm font-semibold text-slate-700">Email</span>
-                  <input
-                    autoComplete="email"
+                  <AutofillResistantInput
+                    autoComplete="off"
                     className="mt-2 h-11 w-full rounded-[20px] border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
-                    defaultValue={isLogin ? loginPrefillEmail : undefined}
+                    defaultValue={isLogin ? loginPrefillEmail : ""}
                     name="email"
                     placeholder="Enter your email"
                     required
@@ -1675,8 +1716,8 @@ function AuthScreen({
                 <label className="block">
                   <span className="text-sm font-semibold text-slate-700">Password</span>
                   <div className="mt-2 flex h-11 items-center rounded-[20px] border border-slate-200 px-3 focus-within:border-blue-400">
-                    <input
-                      autoComplete={isReset ? "new-password" : "current-password"}
+                    <AutofillResistantInput
+                      autoComplete="off"
                       className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none"
                       minLength={8}
                       name="password"
