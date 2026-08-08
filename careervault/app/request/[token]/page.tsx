@@ -113,7 +113,10 @@ export default function DocumentRequestPage() {
     const data = (await response.json()) as { ok: boolean; user?: SessionUser };
     if (data.user) {
       if (data.user.role === "recruiter") {
-        window.location.replace(process.env.NEXT_PUBLIC_HR_PORTAL_URL || "http://localhost:3001");
+        window.location.replace(
+          process.env.NEXT_PUBLIC_HR_PORTAL_URL ||
+            (typeof window !== "undefined" ? `${window.location.origin}/hr` : "/hr"),
+        );
         return;
       }
       setUser(data.user);

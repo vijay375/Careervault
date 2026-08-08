@@ -1,11 +1,10 @@
 /**
- * Production multi-zone base path for the HR Portal (e.g. `/hr`).
- * Leave empty for local development on http://localhost:3001.
+ * HR Portal is always mounted under `/hr` for same-origin role-based access.
  */
 export function getBasePath() {
-  return String(process.env.NEXT_PUBLIC_BASE_PATH || "")
+  return String(process.env.NEXT_PUBLIC_BASE_PATH || "/hr")
     .trim()
-    .replace(/\/$/, "");
+    .replace(/\/$/, "") || "/hr";
 }
 
 /** Prefix an absolute app path with the configured basePath. */

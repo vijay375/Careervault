@@ -78,8 +78,13 @@ const navItems = [
   { href: "/candidates", label: "Candidates", icon: Users },
   { href: "/requests", label: "Requests", icon: ClipboardList },
 ];
-const userPortalUrl = process.env.NEXT_PUBLIC_USER_PORTAL_URL || "http://localhost:3000";
-const hrLoginPath = withBasePath("/login");
+const userPortalUrl = (
+  process.env.NEXT_PUBLIC_USER_PORTAL_URL ||
+  process.env.NEXT_PUBLIC_APP_URL ||
+  "http://localhost:3000"
+).replace(/\/$/, "");
+/** Single public auth entry — never use a separate HR login URL. */
+const authEntryUrl = `${userPortalUrl}/`;
 
 export function HrShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -97,19 +102,19 @@ export function HrShell({ children }: { children: React.ReactNode }) {
           credentials: "include",
         });
         if (!response.ok) {
-          window.location.replace(hrLoginPath);
+          window.location.replace(authEntryUrl);
           return;
         }
 
         const data = (await response.json()) as { ok: boolean; user?: HrUser };
         if (!data.user) {
-          window.location.replace(hrLoginPath);
+          window.location.replace(authEntryUrl);
           return;
         }
 
         setUser(data.user);
       } catch {
-        window.location.replace(hrLoginPath);
+        window.location.replace(authEntryUrl);
         return;
       } finally {
         setIsLoading(false);
@@ -149,7 +154,7 @@ export function HrShell({ children }: { children: React.ReactNode }) {
       method: "POST",
       credentials: "include",
     });
-    window.location.replace(hrLoginPath);
+    window.location.replace(authEntryUrl);
   }
 
   async function markNotificationsRead() {

@@ -768,7 +768,7 @@ export async function submitDocumentRequest(input: SubmitDocumentRequestInput) {
         submittedAt,
         documentCount: submissionResult.documentCount,
         hrPortalUrl: (
-          process.env.NEXT_PUBLIC_HR_PORTAL_URL || "http://localhost:3001"
+          process.env.NEXT_PUBLIC_HR_PORTAL_URL || "http://localhost:3000/hr"
         ).replace(/\/$/, "") + "/candidates",
       }),
       { idempotencyKey: `hr-submission/${submissionResult.request.id}` },

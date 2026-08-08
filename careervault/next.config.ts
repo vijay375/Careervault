@@ -6,11 +6,16 @@ const appDir = path.dirname(fileURLToPath(import.meta.url));
 const sharedDir = path.join(appDir, "shared");
 
 /**
- * Multi-zone: proxy `/hr` to the HR Portal deployment.
- * Set HR_ZONE_URL to the HR project's origin (no trailing slash), e.g.
- * https://careervault-hr.vercel.app
+ * Multi-zone: proxy `/hr` to the HR Portal deployment (or local :3001).
+ * Production: HR_ZONE_URL=https://careervault-hr.vercel.app
+ * Local default: http://localhost:3001
  */
-const hrZoneUrl = (process.env.HR_ZONE_URL || "").trim().replace(/\/$/, "");
+const hrZoneUrl = (
+  process.env.HR_ZONE_URL ||
+  (process.env.NODE_ENV !== "production" ? "http://localhost:3001" : "")
+)
+  .trim()
+  .replace(/\/$/, "");
 
 const nextConfig: NextConfig = {
   turbopack: {

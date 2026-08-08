@@ -85,7 +85,10 @@ const allowedExtensions = ["pdf", "doc", "docx", "jpg", "jpeg", "png"];
 const resendCooldownMs = 60 * 1000;
 const globalSearchResultLimit = 8;
 const loadingRevealDelayMs = 200;
-const hrPortalUrl = process.env.NEXT_PUBLIC_HR_PORTAL_URL || "http://localhost:3001";
+const hrPortalUrl = (
+  process.env.NEXT_PUBLIC_HR_PORTAL_URL ||
+  (typeof window !== "undefined" ? `${window.location.origin}/hr` : "http://localhost:3000/hr")
+).replace(/\/$/, "");
 
 function getSafeReturnPath() {
   if (typeof window === "undefined") {

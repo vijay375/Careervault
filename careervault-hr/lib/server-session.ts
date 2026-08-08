@@ -5,7 +5,6 @@ import {
   hrSessionCookieName,
   type HrUser,
 } from "@/lib/hr-auth";
-import { withBasePath } from "@/lib/base-path";
 
 const useSecureCookies = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
 const sessionCookieDomain = process.env.SESSION_COOKIE_DOMAIN?.trim() || undefined;
@@ -46,7 +45,12 @@ export function unauthorized() {
     {
       ok: false,
       message: "Your recruiter session is missing or does not have access to the HR Portal.",
-      loginUrl: withBasePath("/login"),
+      loginUrl:
+        (
+          process.env.NEXT_PUBLIC_USER_PORTAL_URL ||
+          process.env.NEXT_PUBLIC_APP_URL ||
+          "http://localhost:3000"
+        ).replace(/\/$/, "") + "/",
     },
     { status: 401 },
   );

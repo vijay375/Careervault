@@ -1,13 +1,22 @@
-# Production deployment (User Portal + HR Portal)
+# Production deployment (single URL, role-based portals)
 
-CareerVault is a monorepo with two separate Next.js apps:
+CareerVault is one public website with shared authentication. Role decides which portal opens after login.
 
-| App | Folder | Local | Production |
-|-----|--------|-------|------------|
-| **User Portal** | `careervault/` | http://localhost:3000 | https://careervault-rust.vercel.app/ |
-| **HR Portal** | `careervault-hr/` | http://localhost:3001 | https://careervault-rust.vercel.app/hr |
+| Experience | Folder | After login |
+|------------|--------|-------------|
+| **Shared auth** | `careervault/` | https://careervault-rust.vercel.app/ |
+| **Employee portal** | `careervault/` | User dashboard on `/` |
+| **Recruiter portal** | `careervault-hr/` | HR dashboard on `/hr` (internal route) |
 
-Do **not** merge the apps. Deploy them as two Vercel projects (multi-zone) and keep local ports unchanged.
+Users never choose a separate HR website. They only use:
+
+**https://careervault-rust.vercel.app/**
+
+- Select **Employee** or **Recruiter** during signup  
+- Login once  
+- System redirects by the role stored on the account  
+
+`/hr` is an internal protected route for recruiters (not a second public entry). `/hr/login` redirects back to the shared login.
 
 ## Architecture
 
