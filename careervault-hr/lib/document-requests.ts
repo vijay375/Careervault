@@ -246,7 +246,16 @@ export async function searchRegisteredCandidateAccounts(search: string, limit = 
   }));
 }
 
-export async function expireStaleRequests() {
+let lastExpireStaleAt = 0;
+const expireStaleThrottleMs = 60_000;
+
+export async function expireStaleRequests(options?: { force?: boolean }) {
+  const now = Date.now();
+  if (!options?.force && now - lastExpireStaleAt < expireStaleThrottleMs) {
+    return;
+  }
+  lastExpireStaleAt = now;
+
   await ensureRequestSchema();
   await withTransaction(async (client) => {
     const expired = await client.query<{ id: string; status: RequestStatus }>(
@@ -502,18 +511,21 @@ export async function listDocumentRequests(options: {
   );
 
   const userPortalUrl = options.userPortalUrl?.replace(/\/$/, "");
+  const requestIds = result.rows.map((row) => row.id);
+  const [itemsByRequestId, emailStatusByRequestId] = await Promise.all([
+    loadRequestItemsForMany(requestIds),
+    loadLatestEmailStatusForMany(requestIds),
+  ]);
 
-  const requests = await Promise.all(
-    result.rows.map(async (row) => {
-      const items = await loadRequestItems(row.id);
-      const emailStatus = await loadLatestEmailStatus(row.id);
-      const requestLink =
-        userPortalUrl && row.access_token && activeRequestStatuses.includes(row.status)
-          ? `${userPortalUrl}/request/${row.access_token}`
-          : undefined;
-      return { ...toRequestRecord(row, items, requestLink), emailStatus };
-    }),
-  );
+  const requests = result.rows.map((row) => {
+    const items = itemsByRequestId.get(row.id) || [];
+    const emailStatus = emailStatusByRequestId.get(row.id);
+    const requestLink =
+      userPortalUrl && row.access_token && activeRequestStatuses.includes(row.status)
+        ? `${userPortalUrl}/request/${row.access_token}`
+        : undefined;
+    return { ...toRequestRecord(row, items, requestLink), emailStatus };
+  });
 
   return {
     requests,
@@ -1069,7 +1081,8 @@ export async function submitDocumentRequest(input: SubmitDocumentRequestInput) {
 
 export async function getDashboardStats(hrUserId?: string) {
   await ensureRequestSchema();
-  await expireStaleRequests();
+  // Throttled in expireStaleRequests; do not block dashboard on a second full pass.
+  void expireStaleRequests();
 
   const values: unknown[] = [];
   let ownerFilter = "";
@@ -1078,43 +1091,46 @@ export async function getDashboardStats(hrUserId?: string) {
     ownerFilter = `where created_by_hr_id = $1`;
   }
 
-  const result = await query<{
-    total: string;
-    pending: string;
-    submitted: string;
-    expired: string;
-    active: string;
-  }>(
-    `
-    select
-      count(*)::text as total,
-      count(*) filter (
-        where status in ('sent', 'delivered', 'viewed', 'in_progress')
-      )::text as pending,
-      count(*) filter (where status in ('submitted', 'completed'))::text as submitted,
-      count(*) filter (where status = 'expired')::text as expired,
-      count(*) filter (
-        where status in ('sent', 'delivered', 'viewed', 'in_progress') and expires_at > now()
-      )::text as active
-    from document_requests
-    ${ownerFilter}
-  `,
-    values,
-  );
+  const [statsResult, recentResult] = await Promise.all([
+    query<{
+      total: string;
+      pending: string;
+      submitted: string;
+      expired: string;
+      active: string;
+    }>(
+      `
+      select
+        count(*)::text as total,
+        count(*) filter (
+          where status in ('sent', 'delivered', 'viewed', 'in_progress')
+        )::text as pending,
+        count(*) filter (where status in ('submitted', 'completed'))::text as submitted,
+        count(*) filter (where status = 'expired')::text as expired,
+        count(*) filter (
+          where status in ('sent', 'delivered', 'viewed', 'in_progress') and expires_at > now()
+        )::text as active
+      from document_requests
+      ${ownerFilter}
+    `,
+      values,
+    ),
+    query<RequestRow>(
+      `select id, candidate_name, candidate_email, status, expires_at, created_at,
+              submitted_at, cancelled_at, completed_at, access_token, current_token_id
+       from document_requests
+       ${ownerFilter}
+       order by created_at desc
+       limit 6`,
+      values,
+    ),
+  ]);
 
-  const stats = result.rows[0];
-  const recentResult = await listDocumentRequests({
-    sortBy: "requestDate",
-    sortDirection: "desc",
-    page: 1,
-    pageSize: 6,
-    hrUserId,
-    userPortalUrl: (
-      process.env.NEXT_PUBLIC_USER_PORTAL_URL ||
-      process.env.NEXT_PUBLIC_APP_URL ||
-      "http://localhost:3000"
-    ).replace(/\/$/, ""),
-  });
+  const stats = statsResult.rows[0];
+  const itemsByRequestId = await loadRequestItemsForMany(recentResult.rows.map((row) => row.id));
+  const recentActivity = recentResult.rows.map((row) =>
+    toRequestRecord(row, itemsByRequestId.get(row.id) || []),
+  );
 
   return {
     total: Number(stats.total),
@@ -1122,7 +1138,7 @@ export async function getDashboardStats(hrUserId?: string) {
     submitted: Number(stats.submitted),
     expired: Number(stats.expired),
     active: Number(stats.active),
-    recentActivity: recentResult.requests,
+    recentActivity,
   };
 }
 
@@ -1176,28 +1192,62 @@ export async function getSubmittedDocumentForDownload(
 }
 
 async function loadRequestItems(requestId: string) {
+  const itemsByRequestId = await loadRequestItemsForMany([requestId]);
+  return itemsByRequestId.get(requestId) || [];
+}
+
+async function loadRequestItemsForMany(requestIds: string[]) {
+  const itemsByRequestId = new Map<string, DocumentRequestItem[]>();
+  if (!requestIds.length) {
+    return itemsByRequestId;
+  }
+
   const result = await query<ItemRow>(
     `select id, request_id, document_label, is_custom, sort_order,
             submitted_document_id, submitted_file_name
      from document_request_items
-     where request_id = $1
+     where request_id = any($1::uuid[])
      order by sort_order asc, created_at asc`,
-    [requestId],
+    [requestIds],
   );
 
-  return result.rows.map(toDocumentRequestItem);
+  for (const row of result.rows) {
+    const current = itemsByRequestId.get(row.request_id) || [];
+    current.push(toDocumentRequestItem(row));
+    itemsByRequestId.set(row.request_id, current);
+  }
+
+  return itemsByRequestId;
 }
 
 async function loadLatestEmailStatus(requestId: string) {
-  const result = await query<{ status: "sent" | "failed" | "unconfigured" }>(
-    `select status
+  const statusByRequestId = await loadLatestEmailStatusForMany([requestId]);
+  return statusByRequestId.get(requestId);
+}
+
+async function loadLatestEmailStatusForMany(requestIds: string[]) {
+  const statusByRequestId = new Map<string, "sent" | "failed" | "unconfigured">();
+  if (!requestIds.length) {
+    return statusByRequestId;
+  }
+
+  const result = await query<{
+    request_id: string;
+    status: "sent" | "failed" | "unconfigured";
+  }>(
+    `select distinct on (request_id) request_id, status
      from request_email_deliveries
-     where request_id = $1 and email_type = 'candidate_request'
-     order by attempted_at desc
-     limit 1`,
-    [requestId],
+     where request_id = any($1::uuid[])
+       and email_type = 'candidate_request'
+     order by request_id, attempted_at desc`,
+    [requestIds],
   );
-  return result.rows[0]?.status;
+
+  for (const row of result.rows) {
+    statusByRequestId.set(row.request_id, row.status);
+  }
+
+  return statusByRequestId;
 }
 
 function toDocumentRequestItem(row: ItemRow): DocumentRequestItem {

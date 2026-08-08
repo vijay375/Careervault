@@ -143,6 +143,7 @@ export function HrShell({ children }: { children: React.ReactNode }) {
       }
     }
 
+    // Do not block first paint on notifications; load after session resolves.
     void loadNotifications();
     const intervalId = window.setInterval(() => void loadNotifications(), 30_000);
     return () => window.clearInterval(intervalId);
@@ -154,7 +155,7 @@ export function HrShell({ children }: { children: React.ReactNode }) {
       method: "POST",
       credentials: "include",
     });
-    window.location.replace(authEntryUrl);
+    window.location.replace(`${authEntryUrl}?signedOut=1`);
   }
 
   async function markNotificationsRead() {

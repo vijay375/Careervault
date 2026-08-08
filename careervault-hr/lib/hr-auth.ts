@@ -204,14 +204,15 @@ export async function getHrSessionUser(sessionToken?: string) {
   }
 
   await ensureRequestSchema();
-  const result = await query<UserRow>(
+  const result = await query<UserRow & { hr_user_id: string | null }>(
     `select coalesce(hr_users.id, users.id) as id,
             users.name,
             users.email,
             users.password_hash,
             users.role,
             coalesce(users.first_name, hr_users.first_name) as first_name,
-            coalesce(users.last_name, hr_users.last_name) as last_name
+            coalesce(users.last_name, hr_users.last_name) as last_name,
+            hr_users.id as hr_user_id
      from sessions
      join users on users.id = sessions.user_id
      left join hr_users on lower(hr_users.email) = lower(users.email)
@@ -226,7 +227,10 @@ export async function getHrSessionUser(sessionToken?: string) {
     return null;
   }
 
-  await ensureHrUserRow(user);
+  // Avoid an upsert on every authenticated HR request when the row already exists.
+  if (!user.hr_user_id) {
+    await ensureHrUserRow(user);
+  }
   return toHrUser(user);
 }
 

@@ -747,6 +747,16 @@ export function CareerVaultPlatform() {
 
     const params = new URLSearchParams(window.location.search);
     const auth = params.get("auth");
+    const signedOut = params.get("signedOut");
+
+    if (signedOut === "1") {
+      setLoginPrefillEmail("");
+      setAuthFormKey((key) => key + 1);
+      setAuthMode("login");
+      setAuthMessage("");
+      window.history.replaceState({}, "", "/");
+      return;
+    }
 
     if (auth === "login") {
       setAuthMode("login");
@@ -1025,13 +1035,17 @@ export function CareerVaultPlatform() {
     setDocumentToDelete(null);
     setUploadFile(null);
     setParsedUpload(null);
+    setLoginPrefillEmail("");
+    setAuthFormKey((key) => key + 1);
     setAuthMode("login");
     setAuthMessage("");
     setAuthLoading(false);
     setResetEmail("");
     setResendAvailableAt(0);
     setResendSeconds(0);
-    setToast("Signed out securely.");
+    setToast("");
+    // Hard navigation guarantees a fresh common login form (no retained values).
+    window.location.replace("/?signedOut=1");
   }
 
   function goToDocuments() {

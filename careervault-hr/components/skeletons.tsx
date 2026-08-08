@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-const loadingRevealDelayMs = 200;
+const loadingRevealDelayMs = 0;
 
 export function useDelayedLoading(isLoading: boolean) {
   const [showLoading, setShowLoading] = useState(false);
